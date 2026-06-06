@@ -1,10 +1,10 @@
 @echo off
-REM AgenteSAE - genera el ejecutable de escritorio (Windows)
+REM AgenteSAE - version PORTABLE (un solo .exe, no requiere Python)
 echo Instalando dependencias...
-py -m pip install --upgrade pyinstaller python-docx lxml
+py -m pip install --upgrade pyinstaller pyside6 python-docx lxml
 echo.
-echo Generando ejecutable...
-py -m PyInstaller --onefile --windowed --name AgenteSAE app.py
+echo Generando ejecutable portable...
+py -m PyInstaller --noconfirm --onefile --windowed --name AgenteSAE --distpath dist_portable app.py
 echo.
-echo Listo. El ejecutable esta en:  dist\AgenteSAE.exe
+echo Listo: dist_portable\AgenteSAE.exe  (copialo a cualquier PC Windows)
 pause
