@@ -9,6 +9,7 @@ Ejecutar:   python app.py
 Empacar:    ver INSTALL.md (PyInstaller -> ejecutable de escritorio)
 """
 from __future__ import annotations
+import glob
 import json
 import os
 import re
@@ -43,9 +44,20 @@ def _save_cfg(cfg):
         pass
 
 
+MESES = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
+         "JULIO": 7, "AGOSTO": 8, "SEPTIEMBRE": 9, "OCTUBRE": 10, "NOVIEMBRE": 11, "DICIEMBRE": 12}
+
+
 def _anio(periodo):
     m = re.search(r"(\d{4})", periodo or "")
     return int(m.group(1)) if m else 0
+
+
+def _mes(periodo):
+    for nombre, n in MESES.items():
+        if nombre in (periodo or "").upper():
+            return n
+    return 0
 
 
 class App(ttk.Frame):
@@ -58,6 +70,7 @@ class App(ttk.Frame):
         master.rowconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
 
+        self.v_carpeta = tk.StringVar()
         self.v_actual = tk.StringVar()
         self.v_comp = tk.StringVar()
         self.v_notas = tk.StringVar()
@@ -77,6 +90,14 @@ class App(ttk.Frame):
         ttk.Label(self, text="Sociedad:").grid(row=r, column=0, sticky="w", pady=3)
         cb = ttk.Combobox(self, textvariable=self.v_soc, values=SOCIEDADES, width=20)
         cb.grid(row=r, column=1, sticky="w", pady=3)
+        r += 1
+
+        # Carpeta de la sociedad: autodetecta los PDFs y el Word
+        ttk.Label(self, text="Carpeta de la sociedad:").grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Entry(self, textvariable=self.v_carpeta, width=64).grid(row=r, column=1, sticky="we", pady=3, padx=(0, 6))
+        ttk.Button(self, text="Elegir carpeta…", command=self._pick_folder).grid(row=r, column=2, sticky="w", pady=3)
+        r += 1
+        ttk.Separator(self, orient="horizontal").grid(row=r, column=0, columnspan=3, sticky="we", pady=(2, 6))
         r += 1
 
         self._file_row(r, "Auxiliar del período (PDF):", self.v_actual,
@@ -123,6 +144,66 @@ class App(ttk.Frame):
                 if on_pick:
                     on_pick()
         ttk.Button(self, text="Examinar…", command=browse).grid(row=r, column=2, sticky="w", pady=3)
+
+    def _pick_folder(self):
+        init = self.cfg.get("last_dir", "")
+        d = filedialog.askdirectory(initialdir=init)
+        if not d:
+            return
+        self.v_carpeta.set(d)
+        self.cfg["last_dir"] = d
+        _save_cfg(self.cfg)
+        # detectar sociedad por el nombre de la carpeta
+        up = os.path.basename(d).upper()
+        for s in SOCIEDADES:
+            if s in up:
+                self.v_soc.set(s)
+                break
+        self._status("Detectando archivos…")
+        threading.Thread(target=self._scan_folder, args=(d,), daemon=True).start()
+
+    def _scan_folder(self, folder):
+        pdfs = []
+        for p in glob.glob(os.path.join(folder, "*.pdf")):
+            try:
+                b = parse_pdf(p)
+                pdfs.append((_anio(b.periodo), _mes(b.periodo), p, b.periodo))
+            except Exception:
+                pass
+        pdfs.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        actual = pdfs[0] if pdfs else None
+        comp = None
+        if actual:
+            for cand in pdfs[1:]:                 # mismo mes, año anterior
+                if cand[0] == actual[0] - 1 and cand[1] == actual[1]:
+                    comp = cand
+                    break
+            if comp is None:                       # si no, el siguiente más antiguo
+                comp = next((c for c in pdfs[1:] if c[0] < actual[0]), None)
+            if comp is None and len(pdfs) > 1:
+                comp = pdfs[1]
+        docs = [d for d in glob.glob(os.path.join(folder, "*.docx"))
+                if "ACTUALIZADO" not in os.path.basename(d).upper()
+                and not os.path.basename(d).startswith("~$")]
+        word = None
+        if docs:
+            pref = [d for d in docs if "NOTA" in os.path.basename(d).upper()]
+            word = (pref or sorted(docs, key=os.path.getmtime, reverse=True))[0]
+        self.master.after(0, lambda: self._apply_scan(actual, comp, word))
+
+    def _apply_scan(self, actual, comp, word):
+        msg = []
+        if actual:
+            self.v_actual.set(actual[2]); msg.append(f"actual={actual[3]}")
+        if comp:
+            self.v_comp.set(comp[2]); msg.append(f"comparativo={comp[3]}")
+        if word:
+            self.v_notas.set(word); self._on_pick_notas()
+        faltan = [n for n, v in [("PDF período", actual), ("PDF comparativo", comp), ("Word", word)] if not v]
+        if faltan:
+            self._status("Detección parcial — falta: " + ", ".join(faltan) + ". Completa manualmente.")
+        else:
+            self._status("Archivos detectados: " + "  |  ".join(msg))
 
     def _on_pick_pdf(self):
         self._status("Auxiliar seleccionado.")

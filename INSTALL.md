@@ -40,16 +40,31 @@ pyinstaller --onefile --windowed --name AgenteSAE app.py
 # resultado: dist/AgenteSAE.app
 ```
 
-## Uso mes a mes
+## Uso mes a mes (modo "carpeta por sociedad")
 
-1. Exportar del ERP el **balance de comprobación (PDF)** del mes (período actual)
-   y el del **mismo mes del año anterior** (comparativo).
-2. Abrir AgenteSAE, elegir la sociedad y los tres archivos.
-3. **Procesar** → revisar el panel de resultado (cambios, altas/bajas y
-   observaciones) → el Word actualizado queda guardado con su informe.
+Recomendado: ten una **carpeta por sociedad** (p. ej. `...\IRCA\`) y deja dentro
+cada mes los dos PDF y el Word:
 
-La app recuerda la última carpeta usada y sugiere automáticamente el nombre de
-salida y la sociedad a partir del nombre del Word.
+```
+IRCA\
+   IRCA_2026.pdf                 (balance del período actual)
+   IRCA_2025.pdf                 (balance del mismo mes del año anterior)
+   NOTAS_IRCA_ABRIL_2026.docx    (Word de notas)
+```
+
+1. Exporta del ERP el balance del mes y el del mismo mes del año anterior, y
+   colócalos en la carpeta de la sociedad.
+2. Abre AgenteSAE → **Elegir carpeta…** y selecciona la carpeta de la sociedad.
+   La app **detecta sola** cuál PDF es el período actual y cuál el comparativo
+   (por el "Período" impreso dentro de cada PDF) y cuál es el Word; rellena los
+   campos (puedes ajustarlos si hace falta).
+3. **Procesar** → revisa el panel de resultado (cambios, altas/bajas y
+   observaciones). El Word actualizado (`..._ACTUALIZADO.docx`) y su informe
+   (`..._informe.md`) quedan guardados en la misma carpeta.
+
+> También puedes seleccionar los tres archivos a mano si prefieres.
+> La app recuerda la última carpeta usada y sugiere la sociedad y el nombre de
+> salida a partir de los nombres de archivo.
 
 ## Notas
 
