@@ -27,11 +27,16 @@ cualquier PC Windows (por USB o red).
 
 ### B.2 Instalador con accesos directos (recomendado para el usuario final)
 
-1. Instala **Inno Setup 6** (gratis): https://jrsoftware.org/isdl.php
+1. Instala **Inno Setup 6** (gratis): https://jrsoftware.org/isdl.php  ← **hazlo antes**
 2. Ejecuta **`build_installer.bat`** → produce **`Output\AgenteSAE-Setup.exe`**.
 
 Ese `Setup.exe` instala la app, crea acceso directo en el **escritorio** y el
 **menú inicio**, y agrega **desinstalador**. El equipo final no necesita Python.
+
+> **Si aún no instalas Inno Setup**, el `.bat` te avisará (no falla la app): la
+> aplicación igual queda lista y ejecutable en `dist_app\AgenteSAE\AgenteSAE.exe`.
+> Y si solo quieres un único archivo portable, usa **`build_exe.bat`**, que **no
+> requiere Inno Setup**.
 
 ### B.3 Compilación automática en la nube (sin Python ni compilar)
 
