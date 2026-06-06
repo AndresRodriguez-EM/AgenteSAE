@@ -8,6 +8,17 @@ El objetivo es **actualizar únicamente la información de las tablas del Word
 conservando intacto su formato** (estilos, bordes, sombreados, celdas combinadas,
 fuentes, encabezados y toda la narrativa).
 
+Sociedades soportadas: **IRCA, SANTA, MONTOYA, ZARLHA, INVERMAP, CIA**.
+La **Nota 3** (Propiedad, planta y equipo) se deja intacta a propósito (se
+actualiza manualmente).
+
+## Aplicación de escritorio
+
+Hay una interfaz gráfica lista para usar mes a mes (`app.py`, Tkinter):
+seleccionas la sociedad, el PDF del período, el PDF comparativo del año anterior
+y el Word de notas → **Procesar** → obtienes el Word actualizado y un informe.
+Ver **[INSTALL.md](INSTALL.md)** para ejecutarla o generar un `.exe` de escritorio.
+
 ## Qué hace
 
 1. **Lee los auxiliares (PDF).** `pdf_parser.py` reconstruye el balance de

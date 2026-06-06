@@ -439,19 +439,41 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
                 rep.chg(nota, cfg["sig"], "TOTAL", role, antes, nuevo)
 
 
+def _best_sub(subs, label):
+    """Subcuenta cuyo nombre mejor coincide con el rótulo de la fila."""
+    lt = _toks(label)
+    if not lt:
+        return None
+    best, bs = None, 0
+    for c in subs:
+        sc = len(lt & _toks(c.nombre))
+        if sc > bs or (sc == bs and best is not None and len(c.codigo) < len(best.codigo)):
+            bs, best = sc, c
+    return best if bs > 0 else None
+
+
 def process_cuenta(table, cfg, b26, b25, rep: Report):
+    """Notas a nivel de cuenta (sin terceros), p. ej. Efectivo. Cada fila se
+    mapea a su subcuenta por descripción; el total a la clase configurada."""
     nota = cfg.get("nota", "")
     header_r = _find_header_row(table)
-    hdr = table.rows[header_r]
-    roles = {i: _role_of(c.text) for i, c in enumerate(hdr.cells) if _role_of(c.text)}
-    v26 = abs(b26.saldo(cfg["account"]))
-    v25 = abs(b25.saldo(cfg["account"]))
+    roles = {i: _role_of(c.text) for i, c in enumerate(table.rows[header_r].cells) if _role_of(c.text)}
+    parent = cfg["account"]
+    subs = [c for c in b26.cuentas.values() if c.codigo.startswith(parent) and c.codigo != parent]
+
+    data, total = [], None
     for r in range(header_r + 1, len(table.rows)):
         row = table.rows[r]
         if not any(parse_money(c.text) is not None for _, c in _unique_grid(row)):
             continue
+        if row.cells[0].text.strip():
+            data.append(r)
+        elif total is None:
+            total = r
+
+    def _set(row, concepto, getval):
         for col, role in roles.items():
-            val = v25 if role == "comparativo" else v26
+            val = getval(role)
             cell = row.cells[col]
             existing = parse_money(cell.text)
             if existing is not None and abs(existing - val) <= ROUND_TOL:
@@ -460,7 +482,17 @@ def process_cuenta(table, cfg, b26, b25, rep: Report):
             nuevo = format_like(val, cell)
             if antes != nuevo:
                 set_cell_value(cell, nuevo)
-                rep.chg(nota, cfg["sig"], row.cells[0].text.strip() or "TOTAL", role, antes, nuevo)
+                rep.chg(nota, cfg["sig"], concepto, role, antes, nuevo)
+
+    for r in data:
+        row = table.rows[r]
+        sub = _best_sub(subs, row.cells[0].text)
+        code = sub.codigo if sub else parent
+        _set(row, row.cells[0].text.strip() or "TOTAL",
+             lambda role, code=code: abs(b25.saldo(code) if role == "comparativo" else b26.saldo(code)))
+    if total is not None:
+        _set(table.rows[total], "TOTAL",
+             lambda role: abs(b25.saldo(parent) if role == "comparativo" else b26.saldo(parent)))
 
 
 def _patrimonio(b: Balance):
@@ -542,56 +574,114 @@ def process_vtotal(table, cfg, b26, b25, rep: Report):
 
 
 # --------------------------------------------------------------------------- #
-#  Configuración del template (índices estables, validados por firma)
+#  Configuración por NOTA (independiente de la posición de las tablas)
+#
+#  El recorrido identifica a qué nota pertenece cada tabla siguiendo los
+#  encabezados "NOTA n" y "VALOR TOTAL NOTA n"; dentro de cada nota, cada tabla
+#  de datos se reconoce por su título. Así funciona aunque cambien las filas o
+#  el número de tablas entre sociedades.
+#
+#  Cada entrada de "tablas": (subcadena_de_titulo, kind, alcance)
+#    - kind="terceros"  -> alcance = lista de prefijos de cuenta del PUC
+#    - kind="cuenta"    -> alcance = clase padre (p. ej. "11")
+#    - kind="patrimonio"-> alcance = None
 # --------------------------------------------------------------------------- #
 
-TABLES = [
-    dict(idx=11, kind="cuenta",     nota="1", sig="EFECTIVO Y EQUIVALENTE", account="1105"),
-    dict(idx=12, kind="vtotal",     nota="1", sig="VALOR TOTAL NOTA 1", account="11"),
-    dict(idx=13, kind="terceros",   nota="2", sig="DETALLE CUENTAS POR COBRAR", scope=["1345"]),
-    dict(idx=14, kind="terceros",   nota="2", sig="ANTICIPO DE IMPUESTOS", scope=["1355"]),
-    dict(idx=15, kind="vtotal",     nota="2", sig="VALOR TOTAL NOTA 2", account="13"),
-    dict(idx=16, kind="cuenta",     nota="3", sig="INMUEBLES", account="15"),
-    dict(idx=17, kind="vtotal",     nota="3", sig="VALOR TOTAL NOTA 3", account="15"),
-    dict(idx=18, kind="terceros",   nota="4", sig="CUENTAS POR PAGAR", scope=["2335", "2365"]),
-    dict(idx=20, kind="terceros",   nota="4", sig="MPUESTOS POR PAGAR",
-         scope=["2404", "2405", "2408", "2412", "2416"]),
-    dict(idx=21, kind="terceros",   nota="4", sig="IMPUESTOS MULTAS Y SANCIONES",
-         scope=["2615", "2635"]),
-    dict(idx=23, kind="vtotal",     nota="4", sig="VALOR TOTAL NOTA  4", account="2"),
-    dict(idx=25, kind="patrimonio", nota="5", sig="PATRIMONIO"),
-    dict(idx=26, kind="vtotal",     nota="5", sig="VALOR TOTAL NOTA  5", patrimonio=True),
-    dict(idx=28, kind="terceros",   nota="6", sig="INGRESOS POR ARRENDAMIENTOS", scope=["4155"]),
-    dict(idx=30, kind="vtotal",     nota="6", sig="VALOR TOTAL NOTA 6", account="41"),
-    dict(idx=32, kind="terceros",   nota="7", sig="HONORARIOS", scope=["5110"]),
-    dict(idx=33, kind="terceros",   nota="7", sig="IMPUESTOS", scope=["5115"]),
-    dict(idx=34, kind="terceros",   nota="7", sig="GASTOS LEGALES", scope=["5140"]),
-    dict(idx=35, kind="terceros",   nota="7", sig="SERVICIOS", scope=["5135"]),
-    dict(idx=36, kind="terceros",   nota="7", sig="MANTENIMIENTO", scope=["5145"]),
-    dict(idx=37, kind="terceros",   nota="7", sig="DIVERSOS", scope=["5195"]),
-    dict(idx=38, kind="vtotal",     nota="7", sig="VALOR TOTAL NOTA 7", account="51"),
-    dict(idx=40, kind="terceros",   nota="8", sig="GASTOS EXTRAORDINARIOS", scope=["5305"]),
-    dict(idx=41, kind="terceros",   nota="8", sig="GASTOS EXTRAORDINARIOS", scope=["5315"]),
-    dict(idx=42, kind="vtotal",     nota="8", sig="VALOR TOTAL NOTA 8", account="53"),
-    dict(idx=44, kind="terceros",   nota="9", sig="OTROS INGRESOS", scope=["4295"]),
-    dict(idx=45, kind="vtotal",     nota="9", sig="VALOR TOTAL NOTA 9", account="42"),
-]
+NOTE_CONFIG = {
+    "1": {"vtotal": "11", "tablas": [("EFECTIVO Y EQUIVALENTE", "cuenta", "11")]},
+    "2": {"vtotal": "13", "tablas": [("DETALLE CUENTAS POR COBRAR", "terceros", ["1345"]),
+                                     ("ANTICIPO DE IMPUESTOS", "terceros", ["1355"])]},
+    # Nota 3 (Propiedad, planta y equipo): EXCLUIDA — se actualiza manualmente.
+    "4": {"vtotal": "2", "tablas": [("CUENTAS POR PAGAR", "terceros", ["2335", "2365"]),
+                                    ("MPUESTOS POR PAGAR", "terceros",
+                                     ["2404", "2405", "2408", "2412", "2416"]),
+                                    ("IMPUESTOS MULTAS Y SANCIONES", "terceros", ["2615", "2635"])]},
+    "5": {"vtotal_patrimonio": True, "tablas": [("PATRIMONIO", "patrimonio", None)]},
+    "6": {"vtotal": "41", "tablas": [("INGRESOS POR ARRENDAMIENTOS", "terceros", ["4155"])]},
+    "7": {"vtotal": "51", "tablas": [("HONORARIOS", "terceros", ["5110"]),
+                                     ("IMPUESTOS", "terceros", ["5115"]),
+                                     ("GASTOS LEGALES", "terceros", ["5140"]),
+                                     ("SERVICIOS", "terceros", ["5135"]),
+                                     ("MANTENIMIENTO", "terceros", ["5145"]),
+                                     ("DIVERSOS", "terceros", ["5195"])]},
+    "8": {"vtotal": "53", "tablas": [("GASTOS EXTRAORDINARIOS", "terceros", ["5305"]),
+                                     ("GASTOS EXTRAORDINARIOS", "terceros", ["5315"])]},
+    "9": {"vtotal": "42", "tablas": [("OTROS INGRESOS", "terceros", ["4295"])]},
+}
+
+SKIP_NOTES = {"3"}
 
 _PROCESSORS = {
     "terceros": process_terceros,
     "cuenta": process_cuenta,
     "patrimonio": process_patrimonio,
-    "vtotal": process_vtotal,
 }
 
 
-def update_document(doc, b26: Balance, b25: Balance) -> Report:
-    rep = Report()
-    for cfg in TABLES:
-        table = doc.tables[cfg["idx"]]
-        title = table.rows[0].cells[0].text.upper()
-        if cfg["sig"].upper() not in title:
-            rep.flags.append(f"⚠ Tabla {cfg['idx']} no coincide con firma '{cfg['sig']}' (encontrado: '{title[:40]}'). Se omite.")
+def _nota_en_fila(table):
+    """Devuelve el número de nota si la tabla contiene una fila de encabezado
+    'NOTA | n' (sea tabla de encabezado o fila embebida en un VALOR TOTAL)."""
+    nota = None
+    for row in table.rows:
+        cells = [c.text.strip() for c in _unique_grid_cells(row)]
+        if cells and cells[0].upper() == "NOTA":
+            for c in cells[1:]:
+                if c.isdigit() and 1 <= int(c) <= 9:
+                    nota = c
+                    break
+    return nota
+
+
+def _unique_grid_cells(row):
+    out, seen = [], set()
+    for c in row.cells:
+        if id(c._tc) in seen:
             continue
-        _PROCESSORS[cfg["kind"]](table, cfg, b26, b25, rep)
+        seen.add(id(c._tc))
+        out.append(c)
+    return out
+
+
+def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES) -> Report:
+    rep = Report()
+    queues = {n: list(cfg.get("tablas", [])) for n, cfg in NOTE_CONFIG.items()}
+    current_note = None
+
+    for table in doc.tables:
+        title = table.rows[0].cells[0].text.strip()
+        up = title.upper()
+
+        m = re.search(r"VALOR TOTAL NOTA\s*0*(\d+)", up)
+        if m:                                   # cuadro "VALOR TOTAL NOTA n"
+            n = m.group(1)
+            cfg = NOTE_CONFIG.get(n, {})
+            if n not in skip_notes and cfg:
+                if cfg.get("vtotal_patrimonio"):
+                    process_vtotal(table, {"patrimonio": True, "nota": n, "sig": title}, b26, b25, rep)
+                elif "vtotal" in cfg:
+                    process_vtotal(table, {"account": cfg["vtotal"], "nota": n, "sig": title}, b26, b25, rep)
+        elif _find_header_row(table) is not None and current_note and current_note not in skip_notes:
+            q = queues.get(current_note, [])
+            for i, (sub, kind, scope) in enumerate(q):
+                if sub.upper() in up:
+                    cfg = dict(nota=current_note, sig=title, kind=kind)
+                    if kind == "terceros":
+                        cfg["scope"] = scope
+                    elif kind == "cuenta":
+                        cfg["account"] = scope
+                    _PROCESSORS[kind](table, cfg, b26, b25, rep)
+                    q.pop(i)
+                    break
+
+        # Actualizar la nota vigente para las tablas siguientes.
+        n_aqui = _nota_en_fila(table)
+        if n_aqui:
+            current_note = n_aqui
+
+    # Avisar de tablas esperadas que no se encontraron (posible cambio de template)
+    for n, q in queues.items():
+        if n in skip_notes:
+            continue
+        for sub, kind, scope in q:
+            rep.flags.append(f"Nota {n}: no se encontró la tabla '{sub}' (¿template distinto?).")
     return rep
