@@ -1,0 +1,11 @@
+# Datos financieros de las sociedades (no se versionan por privacidad)
+data/
+output/
+*.docx
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
