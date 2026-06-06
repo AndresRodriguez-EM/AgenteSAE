@@ -12,6 +12,8 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
+SetupIconFile=assets\icon.ico
+UninstallDisplayIcon={app}\AgenteSAE.exe
 
 [Languages]
 Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"

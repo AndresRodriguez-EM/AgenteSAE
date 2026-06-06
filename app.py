@@ -24,6 +24,17 @@ CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".agentesae.json")
 OK, NO = "✔", "—"
 
 
+def resource_path(rel: str) -> str:
+    """Ruta a un recurso, funcione en código o empaquetado con PyInstaller."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
+
+
+def app_icon() -> "QtGui.QIcon":
+    p = resource_path(os.path.join("assets", "icon.png"))
+    return QtGui.QIcon(p) if os.path.exists(p) else QtGui.QIcon()
+
+
 def _load_cfg():
     try:
         with open(CONFIG_PATH, encoding="utf-8") as fh:
@@ -64,6 +75,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ruta_informe = ""
         self._threads = []
         self.setWindowTitle("AgenteSAE")
+        self.setWindowIcon(app_icon())
         self.resize(960, 720)
         self._build_actions()
         self._build_menu_toolbar()
@@ -280,15 +292,23 @@ class MainWindow(QtWidgets.QMainWindow):
             QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.ruta_informe))
 
     def acerca(self):
-        QtWidgets.QMessageBox.about(self, "Acerca de AgenteSAE",
-            "AgenteSAE\n\nActualiza las Notas a los Estados Financieros (Word) de cada "
-            "sociedad a partir de los auxiliares (Balance de Comprobación en PDF), "
-            "conservando el formato y sin modificar la Nota 3.")
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Acerca de AgenteSAE")
+        box.setText("<b>AgenteSAE</b>")
+        box.setInformativeText(
+            "Actualiza las Notas a los Estados Financieros (Word) de cada sociedad "
+            "a partir de los auxiliares (Balance de Comprobación en PDF), conservando "
+            "el formato y sin modificar la Nota 3.")
+        pix = QtGui.QPixmap(resource_path(os.path.join("assets", "icon.png")))
+        if not pix.isNull():
+            box.setIconPixmap(pix.scaled(72, 72, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+        box.exec()
 
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(app_icon())
     w = MainWindow()
     w.show()
     sys.exit(app.exec())

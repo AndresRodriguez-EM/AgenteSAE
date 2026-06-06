@@ -16,9 +16,9 @@ jobs:
       - name: Instalar dependencias
         run: pip install pyinstaller pyside6 python-docx lxml
       - name: Ejecutable portable (onefile)
-        run: pyinstaller --noconfirm --onefile --windowed --name AgenteSAE --distpath dist_portable app.py
+        run: pyinstaller --noconfirm --onefile --windowed --name AgenteSAE --icon assets/icon.ico --add-data "assets;assets" --distpath dist_portable app.py
       - name: Aplicacion (carpeta, para instalador)
-        run: pyinstaller --noconfirm --windowed --name AgenteSAE --distpath dist_app app.py
+        run: pyinstaller --noconfirm --windowed --name AgenteSAE --icon assets/icon.ico --add-data "assets;assets" --distpath dist_app app.py
       - name: Instalador con Inno Setup
         run: |
           choco install innosetup -y --no-progress
