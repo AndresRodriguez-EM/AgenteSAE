@@ -27,17 +27,18 @@ from .pdf_parser import Balance
 # --------------------------------------------------------------------------- #
 
 def parse_money(text: str):
-    t = (text or "").replace("$", "").replace(".", "").replace(" ", "")
-    t = t.replace(",", "")
-    if not re.search(r"\d", t):
+    core = (text or "").replace("$", "").replace(" ", "").strip()
+    neg = core.startswith("-") or (core.startswith("(") and core.endswith(")"))
+    core = core.lstrip("-").strip("()")
+    # Solo dígitos con punto/coma como separador de miles (rechaza fechas "01/08/2024"
+    # y matrículas "126-403", que no son importes).
+    if not core or not re.fullmatch(r"[\d.,]+", core):
         return None
-    neg = "-" in (text or "")
-    t = t.replace("-", "")
-    try:
-        v = float(t)
-        return -v if neg else v
-    except ValueError:
+    digits = core.replace(".", "").replace(",", "")
+    if not digits.isdigit():
         return None
+    v = float(digits)
+    return -v if neg else v
 
 
 def _round(value: float) -> int:
@@ -281,6 +282,14 @@ def find_same25(recs25, r26):
     return None
 
 
+def _es_neteo(recs, code4):
+    """True si bajo la cuenta de 4 dígitos hay terceros con signos opuestos
+    (la cuenta se 'netea', p. ej. IVA generado vs IVA descontable, o retención
+    causada vs pago de retención). En esos casos el Word muestra el NETO."""
+    vals = [r["value"] for r in recs if r["kind"] == "t" and r["code"].startswith(code4)]
+    return any(v > 0 for v in vals) and any(v < 0 for v in vals)
+
+
 def _val(role, r26, r25):
     if role == "comparativo":
         return abs(r25["value"]) if r25 else 0.0
@@ -300,10 +309,11 @@ def _accept_set(recs_year, prim, nit, role, famcode):
     a nivel de cuenta de la misma familia). Si el valor actual del Word ya está
     en este conjunto, la celda es correcta y no se modifica ('do no harm')."""
     out = set()
+    # Solo el registro emparejado (prim) y los netos de su familia de cuenta;
+    # NO todos los terceros del mismo NIT (eso aceptaba valores ajenos, p. ej.
+    # el movimiento 0 de otro tercero de la DIAN).
     for r in recs_year:
-        same_t = r["kind"] == "t" and r["nit"] == nit
-        same_a = r["kind"] == "acc" and famcode and famcode.startswith(r["code"])
-        if same_t or same_a:
+        if r["kind"] == "acc" and famcode and famcode.startswith(r["code"]):
             out.add(_round(r["mov"] if role == "mov" else abs(r["value"])))
     if prim:
         out.add(_round(prim["mov"] if role == "mov" else abs(prim["value"])))
@@ -392,6 +402,12 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         sub26 = [x for x in recs26 if x["code"].startswith(tgt)] if tgt else recs26
         sub25 = [x for x in recs25 if x["code"].startswith(tgt)] if tgt else recs25
         r26 = match_record(sub26, nit, des, hint26, tname=tname)
+        # Si la cuenta se netea (sub-cuentas con signos opuestos), usar el NETO de
+        # la cuenta de 4 dígitos (no el de una sub-cuenta) en ambos años.
+        if r26 is not None and tgt and (_es_neteo(recs26, tgt[:4]) or _es_neteo(recs25, tgt[:4])):
+            acc4 = next((x for x in sub26 if x["kind"] == "acc" and x["code"] == tgt[:4]), None)
+            if acc4 is not None:
+                r26 = acc4
         r25 = find_same25(sub25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
         if r26 is None and r25 is None:
             to_remove.append(r)
@@ -646,7 +662,8 @@ NOTE_CONFIG = {
                                      ["2404", "2405", "2408", "2412", "2416"]),
                                     ("IMPUESTOS MULTAS Y SANCIONES", "terceros", ["2615", "2635"])]},
     # Nota 5 del Word = PATRIMONIO (clase 3 del auxiliar): EXCLUIDA — se hace manual.
-    "6": {"vtotal": "41", "tablas": [("INGRESOS POR ARRENDAMIENTOS", "terceros", ["4155"])]},
+    "6": {"vtotal": "41", "tablas": [("INGRESOS POR ARRENDAMIENTOS", "terceros", ["4155"]),
+                                     ("ITEM", "contratos", ["4155"])]},
     "7": {"vtotal": "51", "tablas": [("HONORARIOS", "terceros", ["5110"]),
                                      ("IMPUESTOS", "terceros", ["5115"]),
                                      ("GASTOS LEGALES", "terceros", ["5140"]),
@@ -659,12 +676,6 @@ NOTE_CONFIG = {
 }
 
 SKIP_NOTES = {"5"}   # Patrimonio (Nota 5 del Word) se actualiza manualmente.
-
-_PROCESSORS = {
-    "terceros": process_terceros,
-    "cuenta": process_cuenta,
-    "patrimonio": process_patrimonio,
-}
 
 
 def _nota_en_fila(table):
@@ -689,6 +700,63 @@ def _unique_grid_cells(row):
         seen.add(id(c._tc))
         out.append(c)
     return out
+
+
+def process_contratos(table, cfg, b26, b25, rep: Report):
+    """Tabla de detalle de contratos de arrendamiento (Nota 6). Toma de los
+    ingresos (4155): cánon mensual y mes actual = MOVIMIENTO DEL MES; total
+    acumulado año = ACUMULADO MES ACTUAL. Empareja cada fila por CÉDULA."""
+    nota = cfg.get("nota", "6")
+    header_r = _find_header_row(table)
+    if header_r is None:
+        return
+    hdr = table.rows[header_r]
+    col_ced = _col_index(hdr, "CEDULA", "CÉDULA")
+    col_canon = _col_index(hdr, "CÁNON", "CANON")
+    col_total = None
+    for i, c in enumerate(hdr.cells):
+        u = c.text.upper()
+        if "TOTAL" in u and ("ACUMULAD" in u or re.search(r"A[NÑ]O", u)):
+            col_total = i
+            break
+    if col_ced is None or col_canon is None or col_total is None:
+        return
+
+    terc = {r["nit"]: r for r in scope_records(b26, cfg["scope"]) if r["kind"] == "t"}
+    data = [r for r in range(header_r + 1, len(table.rows))
+            if _norm_nit(table.rows[r].cells[col_ced].text) in terc]
+    if not data:
+        return
+    valcols = [i for i, c in _unique_grid(table.rows[data[0]]) if parse_money(c.text) is not None]
+    col_month = next((i for i in valcols if col_canon < i < col_total), None)
+
+    if col_month is not None:                       # encabezado del mes actual
+        set_cell_value(hdr.cells[col_month], b26.periodo)
+
+    def _set(cell, val):
+        ex = parse_money(cell.text)
+        if ex is not None and abs(ex - val) <= ROUND_TOL:
+            return
+        a = cell.text.strip()
+        n = format_like(val, cell)
+        if a != n:
+            set_cell_value(cell, n)
+            rep.chg(nota, cfg["sig"], "contrato", "col", a, n)
+
+    cols = [c for c in (col_canon, col_month, col_total) if c is not None]
+    for r in data:
+        rec = terc[_norm_nit(table.rows[r].cells[col_ced].text)]
+        vals = {col_canon: rec["mov"], col_month: rec["mov"], col_total: abs(rec["value"])}
+        for col in cols:
+            _set(table.rows[r].cells[col], vals[col])
+
+    for r in range(header_r + 1, len(table.rows)):   # fila de total (sin cédula)
+        if _norm_nit(table.rows[r].cells[col_ced].text):
+            continue
+        if parse_money(table.rows[r].cells[col_total].text) is not None:
+            for col in cols:
+                _set(table.rows[r].cells[col], sum(parse_money(table.rows[dr].cells[col].text) or 0 for dr in data))
+            break
 
 
 def _des_de_rec(bal: Balance, code: str, fallback: str) -> str:
@@ -770,6 +838,14 @@ def crear_tabla(template_table, anchor_el, titulo, scope, b26, b25, nota, rep) -
     return True
 
 
+_PROCESSORS = {
+    "terceros": process_terceros,
+    "cuenta": process_cuenta,
+    "patrimonio": process_patrimonio,
+    "contratos": process_contratos,
+}
+
+
 def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=True) -> Report:
     rep = Report()
     queues = {n: list(cfg.get("tablas", [])) for n, cfg in NOTE_CONFIG.items()}
@@ -799,6 +875,8 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
                     if kind == "terceros":
                         cfg["scope"] = scope
                         note_template[current_note] = table
+                    elif kind == "contratos":
+                        cfg["scope"] = scope
                     elif kind == "cuenta":
                         cfg["account"] = scope
                     _PROCESSORS[kind](table, cfg, b26, b25, rep)
