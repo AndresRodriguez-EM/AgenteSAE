@@ -195,11 +195,16 @@ def scope_records(bal: Balance, prefixes):
     return recs
 
 
-def _target_account(word_nits, group_des, group_total, acc_recs):
+def _target_account(word_nits, group_des, group_total, acc_recs, n_rows=1):
     """Elige la cuenta (registro 'acc' de 4/6 dígitos) a la que pertenece un grupo
-    de filas del Word con la misma DES CUENTA. Prioriza el solape de NITs (lo más
-    fiable), luego la coincidencia de descripción y por último la cercanía de
-    valor. Devuelve el código de cuenta o None."""
+    de filas del Word con la misma DES CUENTA.
+
+    - Grupos de UNA fila: prioriza valor exacto y luego cercanía de valor (la
+      cifra del Word es fiable; la descripción puede compartir palabras como
+      'RENTA' entre cuentas distintas).
+    - Grupos de VARIAS filas: prioriza valor exacto y luego la descripción (el
+      total puede venir inflado por una fila espuria, así que el nombre manda).
+    """
     if not acc_recs:
         return None
     dw = _toks(group_des)
@@ -212,8 +217,11 @@ def _target_account(word_nits, group_des, group_total, acc_recs):
         val_dist = abs(abs(r["value"]) - abs(group_total)) if group_total else 0
         return exact, des_ov, nit_ov, val_dist
 
-    # Prioridad: valor exacto > descripción > NITs en común > cercanía de valor.
-    best = max(acc_recs, key=lambda r: (lambda e, d, n, v: (e, d, n, -v))(*feats(r)))
+    if n_rows > 1:
+        key = lambda r: (lambda e, d, n, v: (e, d, n, -v))(*feats(r))
+    else:
+        key = lambda r: (lambda e, d, n, v: (e, -v, d, n))(*feats(r))
+    best = max(acc_recs, key=key)
     e, d, n, _ = feats(best)
     return best["code"] if (e or d or n) else None
 
@@ -370,7 +378,7 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         wnits = {_norm_nit(table.rows[r].cells[col_nit].text) for r in rows} if col_nit is not None else set()
         gtot = sum(parse_money(table.rows[r].cells[col_actual].text) or 0.0 for r in rows) if col_actual is not None else 0.0
         dtext = table.rows[rows[0]].cells[col_des].text if col_des is not None else ""
-        target_map[dk] = _target_account(wnits, dtext, gtot, acc26)
+        target_map[dk] = _target_account(wnits, dtext, gtot, acc26, len(rows))
 
     to_remove = []
     for r in data_idx:
@@ -631,12 +639,13 @@ NOTE_CONFIG = {
     "1": {"vtotal": "11", "tablas": [("EFECTIVO Y EQUIVALENTE", "cuenta", "11")]},
     "2": {"vtotal": "13", "tablas": [("DETALLE CUENTAS POR COBRAR", "terceros", ["1345"]),
                                      ("ANTICIPO DE IMPUESTOS", "terceros", ["1355"])]},
-    # Nota 3 (Propiedad, planta y equipo): EXCLUIDA — se actualiza manualmente.
+    # Nota 3 del Word = INMUEBLES / Propiedad, planta y equipo -> clase 15 (Activo).
+    "3": {"vtotal": "15", "tablas": [("INMUEBLES", "cuenta", "15")]},
     "4": {"vtotal": "2", "tablas": [("CUENTAS POR PAGAR", "terceros", ["2335", "2365"]),
                                     ("MPUESTOS POR PAGAR", "terceros",
                                      ["2404", "2405", "2408", "2412", "2416"]),
                                     ("IMPUESTOS MULTAS Y SANCIONES", "terceros", ["2615", "2635"])]},
-    "5": {"vtotal_patrimonio": True, "tablas": [("PATRIMONIO", "patrimonio", None)]},
+    # Nota 5 del Word = PATRIMONIO (clase 3 del auxiliar): EXCLUIDA — se hace manual.
     "6": {"vtotal": "41", "tablas": [("INGRESOS POR ARRENDAMIENTOS", "terceros", ["4155"])]},
     "7": {"vtotal": "51", "tablas": [("HONORARIOS", "terceros", ["5110"]),
                                      ("IMPUESTOS", "terceros", ["5115"]),
@@ -649,7 +658,7 @@ NOTE_CONFIG = {
     "9": {"vtotal": "42", "tablas": [("OTROS INGRESOS", "terceros", ["4295"])]},
 }
 
-SKIP_NOTES = {"3"}
+SKIP_NOTES = {"5"}   # Patrimonio (Nota 5 del Word) se actualiza manualmente.
 
 _PROCESSORS = {
     "terceros": process_terceros,
