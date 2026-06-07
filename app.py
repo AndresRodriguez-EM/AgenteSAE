@@ -271,7 +271,8 @@ class MainWindow(QtWidgets.QMainWindow):
         swap = "  (se intercambiaron actual/comparativo)" if res["swap"] else ""
         self.lbl_resumen.setText(
             f"{res['periodo_actual']} vs {res['periodo_comparativo']}{swap}  ·  "
-            f"{len(rep.changes)} cambios · {len(rep.added)} altas · {len(rep.removed)} bajas · {len(rep.flags)} observaciones")
+            f"{len(rep.changes)} cambios · {len(rep.added)} altas · {len(rep.removed)} bajas · "
+            f"{len(getattr(rep, 'added_tables', []))} tablas creadas · {len(rep.flags)} observaciones")
         self.txt.setMarkdown(res["informe"])
         self.ruta_informe = res["ruta_informe"]
         self.act_inf.setEnabled(True)

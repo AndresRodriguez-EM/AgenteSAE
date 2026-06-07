@@ -281,9 +281,16 @@ def parse_pdf(path: str) -> Balance:
             name = " ".join(t.strip() for t in name_area).strip()
 
             if not has_values:
-                # ¿continuación de nombre? (texto sin valores y sin código nuevo)
+                # ¿continuación de nombre? (texto sin valores y sin código nuevo).
+                # Se ignoran las líneas de encabezado/pie de página del PDF para
+                # que no se peguen al nombre del tercero/cuenta.
                 cont = (code_join + " " + name).strip()
-                if cont and last_obj is not None and not re.match(r"^\d", code_join):
+                # Una continuación de nombre va en MAYÚSCULAS (como todo el PUC);
+                # así se descartan encabezados/pies del PDF (fechas, "p. m.",
+                # "Página", "CAFESOFT...", "AJUSTADO", "Período", etc.).
+                es_nombre = re.fullmatch(r"[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ0-9 .,&/\-]+", cont)
+                es_ruido = re.search(r"CAFESOFT|CONTABILIDAD|P[ÁA]GINA|AJUSTADO|PER[ÍI]ODO|\bNIT\b", cont, re.I)
+                if cont and last_obj is not None and es_nombre and not es_ruido:
                     last_obj.nombre = (last_obj.nombre + " " + cont).strip()
                 continue
 

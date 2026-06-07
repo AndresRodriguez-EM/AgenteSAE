@@ -63,6 +63,7 @@ def generar_informe(rep, b26, b25, meta):
     L.append("")
     L.append(f"**Resumen:** {len(rep.changes)} valores actualizados · "
              f"{len(rep.added)} terceros agregados · {len(rep.removed)} terceros eliminados · "
+             f"{len(getattr(rep, 'added_tables', []))} tablas creadas · "
              f"{len(rep.flags)} observaciones.")
     L.append("")
 
@@ -91,6 +92,15 @@ def generar_informe(rep, b26, b25, meta):
         for tabla, nit, nombre, vals in rep.added:
             v = ", ".join(f"{k}={_fmt(x)}" for k, x in vals.items())
             L.append(f"| {tabla} | {nit} | {nombre} | {v} |")
+        L.append("")
+
+    if getattr(rep, "added_tables", None):
+        L.append("## Tablas creadas (faltaban en el Word y se generaron del auxiliar)")
+        L.append("")
+        L.append("| Nota | Tabla | Terceros |")
+        L.append("|:--:|---|:--:|")
+        for nota, titulo, n in rep.added_tables:
+            L.append(f"| {nota} | {titulo} | {n} |")
         L.append("")
 
     if rep.removed:

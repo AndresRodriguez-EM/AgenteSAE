@@ -41,40 +41,94 @@ def sociedad_de(nombre: str) -> str | None:
     return None
 
 
+# Palabras de otros informes que NO son el balance de comprobación (auxiliar).
+_NEG_PDF = ("BALANCE", "ESTADO", "RESULTADO", "INFORME", "GESTION", "OFICIO",
+            "RADICAC", "EXTRACTO", "INDICADOR", "PLAN", "BIENES", "FLUJO",
+            "CAMBIOS", "INGRESO", "AVANCE", "LIQUIDA", "PROPOSITO", "CONTRATO",
+            "ARREND", "ARRIEND", "SITUACION", "NOTAS", "NOTA", "ANEXO")
+
+
+def _score_pdf_name(path: str, company: str) -> int:
+    """Qué tan probable es que un PDF sea el auxiliar (balance), por su nombre."""
+    name = os.path.splitext(os.path.basename(path))[0].upper()
+    toks = re.findall(r"[A-ZÁÉÍÓÚÑ0-9]+", name)
+    s = 0
+    if re.search(r"\b\d{4}\b", name):
+        s += 2
+    if company and company.upper() in name:
+        s += 1
+    if len([t for t in toks if not t.isdigit()]) <= 2:
+        s += 2
+    if re.fullmatch(r"[A-ZÁÉÍÓÚÑ .]*\d{4}", name.strip()):
+        s += 3
+    if any(w in name for w in _NEG_PDF):
+        s -= 5
+    return s
+
+
+def _score_word_name(path: str, company: str) -> int:
+    name = os.path.splitext(os.path.basename(path))[0].upper()
+    s = 0
+    if "NOTAS" in name or "NOTA" in name:
+        s += 2
+    if "ESTADOS FINANCIEROS" in name:
+        s += 3
+    if company and company.upper() in name:
+        s += 1
+    for w in ("BALANCE", "PROPOSITO", "OFICIO", "RADICAC", "GESTION", "ANEXO"):
+        if w in name:
+            s -= 3
+    return s
+
+
 def detectar_en_carpeta(folder: str) -> dict:
     """Detecta en una carpeta el PDF del período, el comparativo y el Word.
 
     Devuelve dict con rutas y períodos: actual, actual_periodo, comparativo,
     comparativo_periodo, notas, sociedad, faltan (lista de lo que no se encontró).
     """
-    pdfs = []
-    for p in glob.glob(os.path.join(folder, "*.pdf")):
+    company = sociedad_de(os.path.basename(folder)) or ""
+
+    # Parsear solo los PDF más probables (por nombre) y confirmar por contenido
+    # que sean balances reales (>=15 cuentas y con período). Corte temprano.
+    pdf_paths = sorted(glob.glob(os.path.join(folder, "*.pdf")),
+                       key=lambda p: -_score_pdf_name(p, company))
+    balances, years, parsed = [], set(), 0
+    for p in pdf_paths:
+        if _score_pdf_name(p, company) < 0 and balances:
+            break
         try:
             b = parse_pdf(p)
-            pdfs.append((anio(b.periodo), mes(b.periodo), p, b.periodo))
         except Exception:
-            pass
-    pdfs.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            b = None
+        parsed += 1
+        if b and len(b.cuentas) >= 15 and anio(b.periodo):
+            balances.append((anio(b.periodo), mes(b.periodo), p, b.periodo))
+            years.add(anio(b.periodo))
+        if len(balances) >= 2 and len(years) >= 2:
+            break
+        if parsed >= 8:
+            break
+    balances.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
-    actual = pdfs[0] if pdfs else None
+    actual = balances[0] if balances else None
     comp = None
     if actual:
-        for cand in pdfs[1:]:                       # mismo mes, año anterior
+        for cand in balances[1:]:                   # mismo mes, año anterior
             if cand[0] == actual[0] - 1 and cand[1] == actual[1]:
                 comp = cand
                 break
         if comp is None:
-            comp = next((c for c in pdfs[1:] if c[0] < actual[0]), None)
-        if comp is None and len(pdfs) > 1:
-            comp = pdfs[1]
+            comp = next((c for c in balances[1:] if c[0] < actual[0]), None)
+        if comp is None and len(balances) > 1:
+            comp = balances[1]
 
     docs = [d for d in glob.glob(os.path.join(folder, "*.docx"))
             if "ACTUALIZADO" not in os.path.basename(d).upper()
             and not os.path.basename(d).startswith("~$")]
-    word = None
-    if docs:
-        pref = [d for d in docs if "NOTA" in os.path.basename(d).upper()]
-        word = (pref or sorted(docs, key=os.path.getmtime, reverse=True))[0]
+    word = max(docs, key=lambda d: _score_word_name(d, company)) if docs else None
+    if word and _score_word_name(word, company) <= -3:
+        word = None
 
     faltan = [etq for etq, v in [("PDF del período", actual),
                                  ("PDF comparativo", comp),
