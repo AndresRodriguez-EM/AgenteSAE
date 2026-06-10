@@ -986,26 +986,27 @@ def _roll_text(s: str, P) -> str:
     mes_re = "|".join(_MESES + ["SETIEMBRE"])
 
     def r1(m):
-        d, mes, yr = int(m.group(1)), m.group(2), int(m.group(3))
+        d, mes, conn, yr = int(m.group(1)), m.group(2), m.group(3), int(m.group(4))
         mn = _MES_NUM.get(mes.upper())
         if mn and yr == P["year"] and mn < P["num"] and d == calendar.monthrange(yr, mn)[1]:
-            return f"{P['last']} de {_case_like(P['name'], mes)} de {P['year']}"
+            return f"{P['last']} de {_case_like(P['name'], mes)} {conn} {P['year']}"
         return m.group(0)
 
-    s = re.sub(rf"\b(\d{{1,2}})\s+de\s+({mes_re})\s+de\s+(\d{{4}})\b", r1, s, flags=re.I)
+    # Conector mes->año flexible: 'de' o 'del' (se conserva el del original).
+    s = re.sub(rf"\b(\d{{1,2}})\s+de\s+({mes_re})\s+(del?)\s+(\d{{4}})\b", r1, s, flags=re.I)
 
     # R3: '<mes anterior> de <año actual>' en texto (p. ej. 'al cierre del mes de
     # marzo de 2026') -> mes actual. NUNCA si va precedido por un día ('1 de marzo
     # de 2026' = fecha histórica/contrato) ni en el año comparativo.
     def r3(m):
-        return _case_like(P["name"], m.group(1)) + " de " + m.group(2)
+        return _case_like(P["name"], m.group(1)) + " " + m.group(2) + " " + m.group(3)
 
-    s = re.sub(rf"(?<!\d de )\b({P['prior_name']}) de ({P['year']})\b", r3, s, flags=re.I)
+    s = re.sub(rf"(?<!\d de )\b({P['prior_name']}) (del?) ({P['year']})\b", r3, s, flags=re.I)
 
     def r2(m):
         return _case_like(P["name"], m.group(1)) + (m.group(2) or "") + m.group(3) + m.group(4)
 
-    s = re.sub(rf"(?<!de )\b({P['prior_name']})(\s+de)?(\s+)({P['year']}|{P['year'] - 1})\b",
+    s = re.sub(rf"(?<!de )\b({P['prior_name']})(\s+del?)?(\s+)({P['year']}|{P['year'] - 1})\b",
                r2, s, flags=re.I)
     return s
 
@@ -1026,17 +1027,29 @@ def actualizar_fechas(doc, periodo: str, rep=None) -> int:
             new = _roll_text(full, P)
             if new == full:
                 continue
-            # Reparte el texto nuevo respetando los límites de los runs cuando es
-            # posible (preserva formato); si cambia la longitud, vuelca al primero.
-            if len(new) == len(full):
-                i = 0
-                for run in p.runs:
-                    run.text = new[i:i + len(run.text)]
-                    i += len(run.text)
-            else:
-                p.runs[0].text = new
-                for run in p.runs[1:]:
-                    run.text = ""
+            # Solo se reescribe la REGIÓN mínima que cambió (prefijo/sufijo común);
+            # los runs fuera de esa región conservan su texto y formato intactos, y
+            # el texto nuevo se deposita en el primer run que la toca. Así el formato
+            # sobrevive aunque cambie la longitud (p. ej. 'abril' -> 'mayo').
+            pre = 0
+            while pre < len(full) and pre < len(new) and full[pre] == new[pre]:
+                pre += 1
+            suf = 0
+            while (suf < len(full) - pre and suf < len(new) - pre
+                   and full[-1 - suf] == new[-1 - suf]):
+                suf += 1
+            mid_new = new[pre:len(new) - suf]
+            start = len(full) - suf
+            placed, pos = False, 0
+            for run in p.runs:
+                a, b = pos, pos + len(run.text)
+                pos = b
+                if b <= pre or a >= start:
+                    continue                      # run fuera de la región cambiada
+                keep_left = run.text[:max(0, pre - a)]
+                keep_right = run.text[max(0, start - a):] if b > start else ""
+                run.text = keep_left + (mid_new if not placed else "") + keep_right
+                placed = True
             n += 1
 
     proc(doc.paragraphs)
