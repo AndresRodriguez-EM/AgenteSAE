@@ -16,6 +16,7 @@ El emparejamiento Word<->auxiliar se hace por NIT y, cuando un NIT aparece en
 varias cuentas del alcance, se desempata por la DES CUENTA del Word.
 """
 from __future__ import annotations
+import calendar
 import copy
 import math
 import re
@@ -362,6 +363,7 @@ class Report:
         self.added = []          # (tabla, nit, nombre, valores)
         self.removed = []        # (tabla, nit, nombre)
         self.added_tables = []   # (nota, titulo, n_terceros)
+        self.date_changes = 0    # fechas de período actualizadas
         self.flags = []          # observaciones
 
     def chg(self, *a):
@@ -946,6 +948,111 @@ _PROCESSORS = {
 }
 
 
+# --------------------------------------------------------------------------- #
+#  Actualización de FECHAS del período (rueda el mes: marzo -> abril, etc.)
+# --------------------------------------------------------------------------- #
+
+_MESES = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO",
+          "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
+_MES_NUM = {m: i + 1 for i, m in enumerate(_MESES)}
+_MES_NUM["SETIEMBRE"] = 9
+
+
+def _case_like(target: str, sample: str) -> str:
+    if sample.isupper():
+        return target.upper()
+    if sample.islower():
+        return target.lower()
+    return target.capitalize()
+
+
+def _periodo_info(periodo: str):
+    m = re.search(r"([A-ZÁÉÍÓÚ]+)\s+(\d{4})", (periodo or "").upper())
+    if not m or m.group(1) not in _MES_NUM:
+        return None
+    mn = _MES_NUM[m.group(1)]
+    yr = int(m.group(2))
+    pm = mn - 1 or 12
+    return dict(num=mn, name=_MESES[mn - 1], year=yr,
+                last=calendar.monthrange(yr, mn)[1], prior_name=_MESES[pm - 1])
+
+
+def _roll_text(s: str, P) -> str:
+    """Cambia SOLO fechas del período al período actual:
+      * 'último-día de <mes-anterior> de <año actual>'  -> '<último-día> de <mes actual> de <año>'
+        (no toca fechas históricas: distinto año, o día que no es fin de mes)
+      * '<mes anterior> [de] <2025|2026>' (encabezados) -> '<mes actual> ...'
+        (no toca '... de <mes> de ...' por el lookbehind)."""
+    mes_re = "|".join(_MESES + ["SETIEMBRE"])
+
+    def r1(m):
+        d, mes, yr = int(m.group(1)), m.group(2), int(m.group(3))
+        mn = _MES_NUM.get(mes.upper())
+        if mn and yr == P["year"] and mn < P["num"] and d == calendar.monthrange(yr, mn)[1]:
+            return f"{P['last']} de {_case_like(P['name'], mes)} de {P['year']}"
+        return m.group(0)
+
+    s = re.sub(rf"\b(\d{{1,2}})\s+de\s+({mes_re})\s+de\s+(\d{{4}})\b", r1, s, flags=re.I)
+
+    # R3: '<mes anterior> de <año actual>' en texto (p. ej. 'al cierre del mes de
+    # marzo de 2026') -> mes actual. NUNCA si va precedido por un día ('1 de marzo
+    # de 2026' = fecha histórica/contrato) ni en el año comparativo.
+    def r3(m):
+        return _case_like(P["name"], m.group(1)) + " de " + m.group(2)
+
+    s = re.sub(rf"(?<!\d de )\b({P['prior_name']}) de ({P['year']})\b", r3, s, flags=re.I)
+
+    def r2(m):
+        return _case_like(P["name"], m.group(1)) + (m.group(2) or "") + m.group(3) + m.group(4)
+
+    s = re.sub(rf"(?<!de )\b({P['prior_name']})(\s+de)?(\s+)({P['year']}|{P['year'] - 1})\b",
+               r2, s, flags=re.I)
+    return s
+
+
+def actualizar_fechas(doc, periodo: str, rep=None) -> int:
+    """Rueda las fechas del período en narrativa y tablas, preservando formato."""
+    P = _periodo_info(periodo)
+    if not P:
+        return 0
+    n = 0
+
+    def proc(paras):
+        nonlocal n
+        for p in paras:
+            if not p.runs:
+                continue
+            full = "".join(r.text for r in p.runs)
+            new = _roll_text(full, P)
+            if new == full:
+                continue
+            # Reparte el texto nuevo respetando los límites de los runs cuando es
+            # posible (preserva formato); si cambia la longitud, vuelca al primero.
+            if len(new) == len(full):
+                i = 0
+                for run in p.runs:
+                    run.text = new[i:i + len(run.text)]
+                    i += len(run.text)
+            else:
+                p.runs[0].text = new
+                for run in p.runs[1:]:
+                    run.text = ""
+            n += 1
+
+    proc(doc.paragraphs)
+    for t in doc.tables:
+        for row in t.rows:
+            seen = set()
+            for cell in row.cells:
+                if id(cell._tc) in seen:
+                    continue
+                seen.add(id(cell._tc))
+                proc(cell.paragraphs)
+    if rep is not None:
+        rep.date_changes = n
+    return n
+
+
 def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=True) -> Report:
     rep = Report()
     current_note = None
@@ -1014,4 +1121,7 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
                                  f"pero el Word la presenta distinto (revisar manualmente).")
             else:
                 crear_tabla(info[n]["template"], info[n]["anchor"], titulo, [c4], b26, b25, n, rep)
+
+    # Rodar las fechas del período (marzo -> abril, etc.) en narrativa y tablas.
+    actualizar_fechas(doc, b26.periodo, rep)
     return rep

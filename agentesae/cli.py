@@ -64,6 +64,7 @@ def generar_informe(rep, b26, b25, meta):
     L.append(f"**Resumen:** {len(rep.changes)} valores actualizados · "
              f"{len(rep.added)} terceros agregados · {len(rep.removed)} terceros eliminados · "
              f"{len(getattr(rep, 'added_tables', []))} tablas creadas · "
+             f"{getattr(rep, 'date_changes', 0)} fechas actualizadas · "
              f"{len(rep.flags)} observaciones.")
     L.append("")
 
