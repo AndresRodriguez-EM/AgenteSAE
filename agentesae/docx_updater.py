@@ -290,6 +290,17 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None):
     return None
 
 
+def _account_code_rec(bal: Balance, code: str, prefixes):
+    """Si la 'cédula' de una fila es en realidad un CÓDIGO DE CUENTA del alcance
+    (algunas notas traen filas por cuenta, p. ej. 'saldo a favor renta'),
+    devuelve un registro a nivel de cuenta con sus valores."""
+    c = bal.cuentas.get(code)
+    if c is None or not any(code.startswith(p) for p in prefixes):
+        return None
+    return dict(kind="acc", nit=None, code=code, value=c.nuevo_saldo,
+                mov=abs(c.debito - c.credito), des=[c.nombre], child_nits=set())
+
+
 def find_same25(recs25, r26):
     """Registro 2025 con la MISMA identidad (mismo nivel y cuenta) que r26."""
     if r26["kind"] == "t":
@@ -438,6 +449,10 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             if acc4 is not None:
                 r26 = acc4
         r25 = find_same25(sub25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
+        if r26 is None and r25 is None and nit:
+            # ¿La 'cédula' es en realidad un código de cuenta? (filas por cuenta)
+            r26 = _account_code_rec(b26, nit, cfg["scope"])
+            r25 = _account_code_rec(b25, nit, cfg["scope"])
         if r26 is None and r25 is None:
             # Eliminar SOLO si el NIT no existe en ninguna cuenta de la clase
             # (no borrar terceros reales que solo quedaron mal agrupados).
@@ -456,7 +471,7 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
                 matched_tids.add(r26["tid"])
             else:
                 covered.add(r26["code"])
-                matched_tids |= r26["children"]
+                matched_tids |= r26.get("children", set())
         famcode = (r26 or r25 or {}).get("code")
         for col, role in roles.items():
             cell = row.cells[col]
@@ -698,14 +713,15 @@ def process_vtotal(table, cfg, b26, b25, rep: Report):
 # --------------------------------------------------------------------------- #
 
 NOTE_CONFIG = {
-    "1": {"clase": ["11"], "vtotal": "11"},   # Efectivo
-    "2": {"clase": ["13"], "vtotal": "13"},   # Cuentas por cobrar
-    "3": {"clase": ["15"], "vtotal": "15"},   # Propiedad, planta y equipo (inmuebles)
-    "4": {"clase": ["2"],  "vtotal": "2"},    # Acreedores / cuentas por pagar
-    "6": {"clase": ["41"], "vtotal": "41"},   # Ingresos operacionales
-    "7": {"clase": ["51"], "vtotal": "51"},   # Gastos de administración
-    "8": {"clase": ["53"], "vtotal": "53"},   # Gastos no operacionales
-    "9": {"clase": ["42"], "vtotal": "42"},   # Ingresos no operacionales
+    "1": {"clase": ["11"], "vtotal": "11"},     # Efectivo
+    "2": {"clase": ["13"], "vtotal": "13"},     # Cuentas por cobrar
+    "3": {"clase": ["15"], "vtotal": "15"},     # Propiedad, planta y equipo (inmuebles)
+    "3.1": {"clase": ["17"], "vtotal": "17"},   # Gastos diferidos / pagados por anticipado
+    "4": {"clase": ["2"],  "vtotal": "2"},      # Acreedores / cuentas por pagar
+    "6": {"clase": ["41"], "vtotal": "41"},     # Ingresos operacionales
+    "7": {"clase": ["51"], "vtotal": "51"},     # Gastos de administración
+    "8": {"clase": ["53"], "vtotal": "53"},     # Gastos no operacionales
+    "9": {"clase": ["42"], "vtotal": "42"},     # Ingresos no operacionales
 }
 
 # Nota 5 (Patrimonio = clase 3) y Nota 10 (Cuentas de orden) se hacen manual.
@@ -734,7 +750,8 @@ def _nota_en_fila(table):
         cells = [c.text.strip() for c in _unique_grid_cells(row)]
         if cells and cells[0].upper() == "NOTA":
             for c in cells[1:]:
-                if c.isdigit() and 1 <= int(c) <= 99:
+                # Acepta notas enteras ("4") y sub-notas decimales ("3.1").
+                if re.fullmatch(r"\d{1,2}(\.\d+)?", c):
                     nota = c
                     break
     return nota
@@ -753,13 +770,18 @@ def _unique_grid_cells(row):
 def process_contratos(table, cfg, b26, b25, rep: Report):
     """Tabla de detalle de contratos de arrendamiento (Nota 6). Toma de los
     ingresos (4155): cánon mensual y mes actual = MOVIMIENTO DEL MES; total
-    acumulado año = ACUMULADO MES ACTUAL. Empareja cada fila por CÉDULA."""
+    acumulado año = ACUMULADO MES ACTUAL.
+
+    Empareja cada fila por NOMBRE del arrendatario primero (en algunas
+    sociedades las cédulas de esta tabla están corridas/erradas) y por cédula
+    como respaldo. Las filas sin pareja no se tocan, pero sí suman al total."""
     nota = cfg.get("nota", "6")
     header_r = _find_header_row(table)
     if header_r is None:
         return
     hdr = table.rows[header_r]
     col_ced = _col_index(hdr, "CEDULA", "CÉDULA")
+    col_arr = _col_index(hdr, "ARRENDATARIO")
     col_canon = _col_index(hdr, "CÁNON", "CANON")
     col_total = None
     for i, c in enumerate(hdr.cells):
@@ -767,17 +789,48 @@ def process_contratos(table, cfg, b26, b25, rep: Report):
         if "TOTAL" in u and ("ACUMULAD" in u or re.search(r"A[NÑ]O", u)):
             col_total = i
             break
-    if col_ced is None or col_canon is None or col_total is None:
+    if col_canon is None or col_total is None or (col_ced is None and col_arr is None):
         return
 
-    terc = {r["nit"]: r for r in scope_records(b26, cfg["scope"]) if r["kind"] == "t"}
-    data = [r for r in range(header_r + 1, len(table.rows))
-            if _norm_nit(table.rows[r].cells[col_ced].text) in terc]
+    recs = [r for r in scope_records(b26, cfg["scope"]) if r["kind"] == "t"]
+    by_nit = {r["nit"]: r for r in recs}
+
+    def match_row(r):
+        name = table.rows[r].cells[col_arr].text if col_arr is not None else ""
+        nt = _toks(name)
+        if nt:
+            best, bs = None, 0
+            for rec in recs:
+                sc = len(nt & _toks(rec["t"].nombre))
+                if sc > bs:
+                    bs, best = sc, rec
+            if best is not None and bs >= min(2, len(nt)):
+                return best
+        if col_ced is not None:
+            return by_nit.get(_norm_nit(table.rows[r].cells[col_ced].text))
+        return None
+
+    # Filas de datos: cánon con valor y arrendatario con TEXTO (letras). Esto
+    # excluye filas ajenas embebidas en la misma tabla (cuadros "VALOR TOTAL",
+    # encabezados de mes, etc.).
+    data, total_row = [], None
+    for r in range(header_r + 1, len(table.rows)):
+        rowtxt = " ".join(c.text for c in _unique_grid_cells(table.rows[r])).upper()
+        if "VALOR TOTAL" in rowtxt:
+            continue
+        canon_ok = parse_money(table.rows[r].cells[col_canon].text) is not None
+        arr = table.rows[r].cells[col_arr].text.strip() if col_arr is not None else ""
+        arr_es_texto = bool(re.search(r"[A-ZÁÉÍÓÚÑ]{3,}", arr.upper()))
+        if canon_ok and arr_es_texto:
+            data.append(r)
+        elif total_row is None and not arr_es_texto and \
+                parse_money(table.rows[r].cells[col_total].text) is not None:
+            total_row = r
+
     if not data:
         return
     valcols = [i for i, c in _unique_grid(table.rows[data[0]]) if parse_money(c.text) is not None]
     col_month = next((i for i in valcols if col_canon < i < col_total), None)
-
     if col_month is not None:                       # encabezado del mes actual
         set_cell_value(hdr.cells[col_month], b26.periodo)
 
@@ -793,18 +846,17 @@ def process_contratos(table, cfg, b26, b25, rep: Report):
 
     cols = [c for c in (col_canon, col_month, col_total) if c is not None]
     for r in data:
-        rec = terc[_norm_nit(table.rows[r].cells[col_ced].text)]
+        rec = match_row(r)
+        if rec is None:
+            continue
         vals = {col_canon: rec["mov"], col_month: rec["mov"], col_total: abs(rec["value"])}
         for col in cols:
             _set(table.rows[r].cells[col], vals[col])
 
-    for r in range(header_r + 1, len(table.rows)):   # fila de total (sin cédula)
-        if _norm_nit(table.rows[r].cells[col_ced].text):
-            continue
-        if parse_money(table.rows[r].cells[col_total].text) is not None:
-            for col in cols:
-                _set(table.rows[r].cells[col], sum(parse_money(table.rows[dr].cells[col].text) or 0 for dr in data))
-            break
+    if total_row is not None:                        # total = suma de TODAS las filas
+        for col in cols:
+            _set(table.rows[total_row].cells[col],
+                 sum(parse_money(table.rows[dr].cells[col].text) or 0 for dr in data))
 
 
 def _des_de_rec(bal: Balance, code: str, fallback: str) -> str:
@@ -894,16 +946,17 @@ _PROCESSORS = {
 }
 
 
-def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=False) -> Report:
+def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=True) -> Report:
     rep = Report()
     current_note = None
-    info = {n: {"template": None, "anchor": None, "matched": set(), "accounts": set()} for n in NOTE_CONFIG}
+    info = {n: {"template": None, "anchor": None, "matched": set(), "accounts": set(),
+                "titles": []} for n in NOTE_CONFIG}
 
     for table in doc.tables:
         title = table.rows[0].cells[0].text.strip()
         up = title.upper()
 
-        m = re.search(r"VALOR TOTAL NOTA\s*0*(\d+)", up)
+        m = re.search(r"VALOR TOTAL NOTA\s*0*(\d+(?:\.\d+)?)", up)
         if m:                                   # cuadro "VALOR TOTAL NOTA n"
             n = m.group(1)
             cfg = NOTE_CONFIG.get(n, {})
@@ -919,6 +972,7 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
                 kind = _detect_kind(table, hr)
                 if kind == "terceros":
                     info[n]["template"] = table
+                    info[n]["titles"].append(up)
                     matched, taccts = process_terceros(table, dict(nota=n, sig=title, scope=clase), b26, b25, rep)
                     info[n]["matched"] |= matched
                     info[n]["accounts"] |= taccts
@@ -931,10 +985,10 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
         if n_aqui:
             current_note = n_aqui
 
-    # Cuentas (4 díg) de la clase con terceros que NINGUNA sub-tabla cubrió.
-    # Por seguridad NO se crean tablas automáticamente (podrían duplicar en
-    # documentos grandes); se AVISA para revisión manual. Con crear_faltantes=True
-    # sí se crean (clonando una tabla hermana).
+    # Cuentas (4 díg) de la clase con terceros que NINGUNA sub-tabla cubrió:
+    # se crea la tabla desde el auxiliar (deseo del usuario), SALVO que ya exista
+    # en la nota una tabla con título similar (sería un duplicado: la sociedad
+    # presenta esa cuenta con otra estructura) — en ese caso solo se avisa.
     for n, cfg in NOTE_CONFIG.items():
         if n in skip_notes or info[n]["template"] is None or info[n]["anchor"] is None:
             continue
@@ -950,9 +1004,14 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
             if not any(abs(t["value"]) >= 1 or t["mov"] >= 1 for t in terc):
                 continue
             titulo = b26.cuentas[c4].nombre if c4 in b26.cuentas else c4
-            if crear_faltantes:
-                crear_tabla(info[n]["template"], info[n]["anchor"], titulo, [c4], b26, b25, n, rep)
+            ntoks = _toks(titulo)
+            similar = any(len(ntoks & _toks(t)) >= min(2, len(ntoks)) for t in info[n]["titles"])
+            # Cuentas que se netean (p. ej. retención causada vs pagada): la
+            # presentación es a criterio del contador -> solo avisar.
+            netea = _es_neteo(scope_records(b26, [c4]), c4) or _es_neteo(scope_records(b25, [c4]), c4)
+            if similar or netea or not crear_faltantes:
+                rep.flags.append(f"Nota {n}: la cuenta {c4} '{titulo}' tiene datos en el auxiliar "
+                                 f"pero el Word la presenta distinto (revisar manualmente).")
             else:
-                rep.flags.append(f"Nota {n}: la cuenta {c4} '{titulo}' tiene datos en el "
-                                 f"auxiliar y no parece tener tabla en el Word (revisar manualmente).")
+                crear_tabla(info[n]["template"], info[n]["anchor"], titulo, [c4], b26, b25, n, rep)
     return rep

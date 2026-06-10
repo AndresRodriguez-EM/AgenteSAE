@@ -33,8 +33,14 @@ def mes(periodo: str) -> int:
     return 0
 
 
+_ALIAS = {"INVERMARP": "INVERMAP"}   # variantes de escritura en los archivos
+
+
 def sociedad_de(nombre: str) -> str | None:
     up = (nombre or "").upper()
+    for alias, s in _ALIAS.items():
+        if alias in up:
+            return s
     for s in SOCIEDADES:
         if s in up:
             return s
