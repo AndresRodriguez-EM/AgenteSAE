@@ -1,0 +1,209 @@
+//@version=6
+// =====================================================================================
+//  ORO (XAU/USD) — Tendencia + Pullback + RSI + ATR  |  5m / 15m
+// -------------------------------------------------------------------------------------
+//  Concepto:
+//    1) ESTRUCTURA / TENDENCIA  -> EMA 200 (macro) + EMA 50 (medio plazo / pullback)
+//    2) MOMENTO (GATILLO)       -> RSI 14 saliendo de sobreventa/sobrecompra
+//    3) GESTIÓN DE RIESGO       -> Cajas SL/TP por volatilidad (ATR 14), ratio 1:2
+//
+//  Reglas:
+//    - LONG : precio > EMA200, retroceso que toca la EMA50, y RSI gira al alza.
+//    - SHORT: precio < EMA200, pullback que toca la EMA50, y RSI gira a la baja.
+//
+//  NO-REPAINT: todas las condiciones se evalúan con datos cerrados y la señal solo
+//  se confirma al CIERRE de la vela (barstate.isconfirmed). No usa request.security
+//  con lookahead ni referencias a futuro -> las señales y cajas no se mueven.
+// =====================================================================================
+indicator("Oro XAUUSD | Tendencia + Pullback + RSI + ATR", shorttitle="XAU Trend-Pullback",
+     overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// -------------------------------------------------------------------------------------
+// 1) CONFIGURACIÓN (INPUTS)
+// -------------------------------------------------------------------------------------
+grpTrend = "1) Tendencia (EMAs)"
+emaSlowLen   = input.int(200, "EMA Tendencia Macro", minval = 1, group = grpTrend,
+     tooltip = "Define la tendencia principal. Precio por encima = solo Longs; por debajo = solo Shorts.")
+emaFastLen   = input.int(50,  "EMA Medio Plazo / Pullback", minval = 1, group = grpTrend,
+     tooltip = "Zona de retroceso (pullback) que el precio debe tocar antes de entrar.")
+requireStack = input.bool(false, "Exigir alineación EMA50 vs EMA200", group = grpTrend,
+     tooltip = "Si está activo: Long exige EMA50 > EMA200 y Short exige EMA50 < EMA200 (tendencia más limpia).")
+
+grpRsi = "2) Momento (RSI)"
+rsiLen        = input.int(14, "Periodo RSI", minval = 1, group = grpRsi)
+rsiOversold   = input.float(30, "RSI Sobreventa",  minval = 1,  maxval = 50, group = grpRsi,
+     tooltip = "Umbral de sobreventa para compras. Usa 20 para señales más estrictas (como en la spec original).")
+rsiOverbought = input.float(70, "RSI Sobrecompra", minval = 50, maxval = 99, group = grpRsi,
+     tooltip = "Umbral de sobrecompra para ventas. Usa 80 para señales más estrictas.")
+rsiMode       = input.string("Salida de zona (recomendado)", "Gatillo RSI",
+     options = ["Salida de zona (recomendado)", "Entrada en zona extrema"], group = grpRsi,
+     tooltip = "Salida de zona: el RSI vuelve a cruzar el umbral (momento girando, anti-cuchillos). " +
+               "Entrada en zona extrema: el RSI cruza hacia dentro de la zona.")
+
+grpRisk = "3) Gestión de Riesgo (ATR)"
+atrLen  = input.int(14, "Periodo ATR", minval = 1, group = grpRisk)
+slMult  = input.float(1.5, "Multiplicador Stop Loss (x ATR)", minval = 0.1, step = 0.1, group = grpRisk,
+     tooltip = "Distancia del SL desde la entrada = slMult * ATR.")
+rrRatio = input.float(2.0, "Ratio Riesgo/Beneficio (TP)", minval = 0.1, step = 0.1, group = grpRisk,
+     tooltip = "TP = Ratio * (distancia de riesgo). 2.0 = 1:2 (TP el doble del SL).")
+
+grpPb = "4) Pullback"
+pbLookback = input.int(6, "Ventana de Pullback (velas)", minval = 1, group = grpPb,
+     tooltip = "Nº de velas hacia atrás en las que el precio debe haber tocado la EMA de pullback.")
+pbTolMult  = input.float(0.5, "Tolerancia de toque EMA50 (x ATR)", minval = 0, step = 0.1, group = grpPb,
+     tooltip = "Banda de tolerancia alrededor de la EMA50 para considerar válido el 'toque'.")
+cooldown   = input.int(5, "Velas mínimas entre señales", minval = 0, group = grpPb,
+     tooltip = "Evita señales solapadas/ruido. 0 = sin cooldown.")
+
+grpViz = "5) Visual"
+showEmas  = input.bool(true,  "Mostrar EMAs", group = grpViz)
+showBoxes = input.bool(true,  "Mostrar cajas SL/TP", group = grpViz)
+showPanel = input.bool(true,  "Mostrar panel informativo", group = grpViz)
+boxExtend = input.int(20, "Largo de cajas SL/TP (velas)", minval = 1, group = grpViz)
+buyColor  = input.color(color.lime,  "Color BUY",  group = grpViz)
+sellColor = input.color(color.red,   "Color SELL", group = grpViz)
+tpColor   = input.color(color.green, "Color Take Profit", group = grpViz)
+slColor   = input.color(color.red,   "Color Stop Loss",  group = grpViz)
+
+// -------------------------------------------------------------------------------------
+// 2) CÁLCULOS BASE
+// -------------------------------------------------------------------------------------
+emaSlow = ta.ema(close, emaSlowLen)   // tendencia macro
+emaFast = ta.ema(close, emaFastLen)   // medio plazo / pullback
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
+
+// Solo operamos cuando hay datos suficientes (evita señales en el warm-up)
+ready = not na(emaSlow) and not na(emaFast) and not na(atr) and not na(rsi)
+
+// Tendencia macro
+trendUp   = close > emaSlow
+trendDown = close < emaSlow
+stackOkLong  = not requireStack or emaFast > emaSlow
+stackOkShort = not requireStack or emaFast < emaSlow
+
+// Pullback: el precio tocó la EMA50 dentro de la ventana, con tolerancia por ATR
+tol             = pbTolMult * atr
+pulledBackLong  = ta.lowest(low,  pbLookback) <= emaFast + tol
+pulledBackShort = ta.highest(high, pbLookback) >= emaFast - tol
+
+// Gatillo RSI (saliendo de zona = recomendado; o entrando en zona extrema)
+reversalMode = rsiMode == "Salida de zona (recomendado)"
+rsiLong  = reversalMode ? ta.crossover(rsi, rsiOversold)    : ta.crossunder(rsi, rsiOversold)
+rsiShort = reversalMode ? ta.crossunder(rsi, rsiOverbought) : ta.crossover(rsi, rsiOverbought)
+
+// -------------------------------------------------------------------------------------
+// 3) SEÑALES (confirmadas al cierre -> sin repintado)
+// -------------------------------------------------------------------------------------
+longRaw  = ready and trendUp   and stackOkLong  and pulledBackLong  and rsiLong  and barstate.isconfirmed
+shortRaw = ready and trendDown and stackOkShort and pulledBackShort and rsiShort and barstate.isconfirmed
+
+// Cooldown para no encadenar señales pegadas
+var int lastSignalBar = na
+canFire = na(lastSignalBar) ? true : (bar_index - lastSignalBar) >= cooldown
+
+longSignal  = longRaw  and canFire
+shortSignal = shortRaw and canFire
+
+// -------------------------------------------------------------------------------------
+// 4) NIVELES SL / TP (basados en ATR)
+// -------------------------------------------------------------------------------------
+riskDist = slMult * atr
+
+longEntry  = close
+longSL     = longEntry - riskDist
+longTP     = longEntry + rrRatio * riskDist
+
+shortEntry = close
+shortSL    = shortEntry + riskDist
+shortTP    = shortEntry - rrRatio * riskDist
+
+// Memoria de la última operación (para el panel)
+var float pEntry = na
+var float pSL    = na
+var float pTP    = na
+var string pDir  = "—"
+
+// -------------------------------------------------------------------------------------
+// 5) DIBUJO DE SEÑALES Y CAJAS
+// -------------------------------------------------------------------------------------
+if longSignal
+    lastSignalBar := bar_index
+    pEntry := longEntry
+    pSL    := longSL
+    pTP    := longTP
+    pDir   := "LONG"
+    label.new(bar_index, low - tol - 0.2 * atr, "BUY", style = label.style_label_up,
+         color = buyColor, textcolor = color.black, size = size.normal)
+    if showBoxes
+        // Caja de beneficio (entrada -> TP)
+        box.new(bar_index, longTP, bar_index + boxExtend, longEntry,
+             border_color = color.new(tpColor, 40), bgcolor = color.new(tpColor, 82),
+             text = "TP " + str.tostring(longTP, format.mintick), text_color = color.new(tpColor, 0),
+             text_halign = text.align_right, text_valign = text.align_top, text_size = size.small)
+        // Caja de riesgo (entrada -> SL)
+        box.new(bar_index, longEntry, bar_index + boxExtend, longSL,
+             border_color = color.new(slColor, 40), bgcolor = color.new(slColor, 82),
+             text = "SL " + str.tostring(longSL, format.mintick), text_color = color.new(slColor, 0),
+             text_halign = text.align_right, text_valign = text.align_bottom, text_size = size.small)
+        line.new(bar_index, longEntry, bar_index + boxExtend, longEntry,
+             color = color.new(color.gray, 0), style = line.style_dashed)
+
+if shortSignal
+    lastSignalBar := bar_index
+    pEntry := shortEntry
+    pSL    := shortSL
+    pTP    := shortTP
+    pDir   := "SHORT"
+    label.new(bar_index, high + tol + 0.2 * atr, "SELL", style = label.style_label_down,
+         color = sellColor, textcolor = color.white, size = size.normal)
+    if showBoxes
+        // Caja de beneficio (entrada -> TP)
+        box.new(bar_index, shortEntry, bar_index + boxExtend, shortTP,
+             border_color = color.new(tpColor, 40), bgcolor = color.new(tpColor, 82),
+             text = "TP " + str.tostring(shortTP, format.mintick), text_color = color.new(tpColor, 0),
+             text_halign = text.align_right, text_valign = text.align_bottom, text_size = size.small)
+        // Caja de riesgo (entrada -> SL)
+        box.new(bar_index, shortSL, bar_index + boxExtend, shortEntry,
+             border_color = color.new(slColor, 40), bgcolor = color.new(slColor, 82),
+             text = "SL " + str.tostring(shortSL, format.mintick), text_color = color.new(slColor, 0),
+             text_halign = text.align_right, text_valign = text.align_top, text_size = size.small)
+        line.new(bar_index, shortEntry, bar_index + boxExtend, shortEntry,
+             color = color.new(color.gray, 0), style = line.style_dashed)
+
+// -------------------------------------------------------------------------------------
+// 6) EMAs EN EL GRÁFICO
+// -------------------------------------------------------------------------------------
+plot(showEmas ? emaSlow : na, "EMA Macro (200)",   color = color.new(color.blue,   0), linewidth = 2)
+plot(showEmas ? emaFast : na, "EMA Pullback (50)", color = color.new(color.orange, 0), linewidth = 2)
+
+// -------------------------------------------------------------------------------------
+// 7) PANEL INFORMATIVO
+// -------------------------------------------------------------------------------------
+var table panel = table.new(position.top_right, 2, 6, border_width = 1, frame_color = color.new(color.gray, 50), frame_width = 1)
+if showPanel and barstate.islast
+    trendTxt   = trendUp ? "ALCISTA ▲" : trendDown ? "BAJISTA ▼" : "NEUTRA"
+    trendCol   = trendUp ? color.green : trendDown ? color.red : color.gray
+    dirCol     = pDir == "LONG" ? color.green : pDir == "SHORT" ? color.red : color.gray
+    headBg     = color.new(color.blue, 0)
+    rowBg      = color.new(color.black, 80)
+    table.cell(panel, 0, 0, "XAU Trend-Pullback", text_color = color.white, bgcolor = headBg, text_size = size.small)
+    table.cell(panel, 1, 0, "5m / 15m",          text_color = color.white, bgcolor = headBg, text_size = size.small)
+    table.cell(panel, 0, 1, "Tendencia", bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 1, trendTxt,    bgcolor = rowBg, text_color = trendCol,    text_size = size.small)
+    table.cell(panel, 0, 2, "RSI(" + str.tostring(rsiLen) + ")", bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 2, str.tostring(rsi, "#.0"),            bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 0, 3, "ATR(" + str.tostring(atrLen) + ")", bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 3, str.tostring(atr, format.mintick),   bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 0, 4, "Última señal", bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 4, pDir,           bgcolor = rowBg, text_color = dirCol,      text_size = size.small)
+    table.cell(panel, 0, 5, "E / SL / TP", bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(panel, 1, 5, na(pEntry) ? "—" : str.tostring(pEntry, format.mintick) + " / " + str.tostring(pSL, format.mintick) + " / " + str.tostring(pTP, format.mintick),
+         bgcolor = rowBg, text_color = color.white, text_size = size.small)
+
+// -------------------------------------------------------------------------------------
+// 8) ALERTAS
+// -------------------------------------------------------------------------------------
+alertcondition(longSignal,  title = "BUY XAUUSD",  message = "🟢 BUY Oro (XAUUSD) | Entrada {{close}} | SL/TP por ATR")
+alertcondition(shortSignal, title = "SELL XAUUSD", message = "🔴 SELL Oro (XAUUSD) | Entrada {{close}} | SL/TP por ATR")
+alertcondition(longSignal or shortSignal, title = "Cualquier señal XAUUSD", message = "⚡ Nueva señal Oro (XAUUSD) en {{ticker}} {{interval}} @ {{close}}")
