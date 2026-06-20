@@ -1395,6 +1395,114 @@ def actualizar_fechas(doc, periodo: str, rep=None) -> int:
     return n
 
 
+def _append_orphan(template, recs26, recs25, b26, b25, rep, nota, sig):
+    """Agrega los terceros de una cuenta 'huérfana' (con datos en el auxiliar pero sin
+    tabla propia) a la tabla EXISTENTE de la nota (p. ej. FINANCIEROS dentro de GASTOS
+    EXTRAORDINARIOS). No crea tablas nuevas: respeta el formato de la SAE."""
+    from docx.table import _Row
+    hr = _find_header_row(template)
+    if hr is None:
+        return 0
+    hdr = template.rows[hr]
+    roles = {i: _role_of(c.text) for i, c in enumerate(hdr.cells) if _role_of(c.text)}
+    col_nit = _col_index(hdr, "CEDULA", "CÉDULA", "ID,")
+    col_ter = _col_index(hdr, "TERCERO")
+    col_des = _col_index(hdr, "DES CUENTA", "DESCRIPCION", "DESCRICION", "DES CUE")
+    if col_nit is None or not roles:
+        return 0
+    data_idx, total_idx = _data_rows(template, hr, col_nit)
+    if not data_idx:
+        return 0
+    nit_sep = _detect_nit_sep(template.rows[data_idx[0]].cells[col_nit].text)
+    tmpl = copy.deepcopy(template.rows[data_idx[0]]._tr)
+    last = template.rows[data_idx[-1]]._tr
+    map26 = {(r["nit"], r["code"]): r for r in recs26 if r["kind"] == "t"}
+    map25 = {(r["nit"], r["code"]): r for r in recs25 if r["kind"] == "t"}
+    n = 0
+    for k in list(map26) + [k for k in map25 if k not in map26]:
+        r26, r25 = map26.get(k), map25.get(k)
+        if not ((abs(r26["value"]) if r26 else 0) >= 1 or (r26["mov"] if r26 else 0) >= 1
+                or (abs(r25["value"]) if r25 else 0) >= 1):
+            continue
+        base = r26 or r25
+        new = copy.deepcopy(tmpl)
+        last.addnext(new)
+        last = new
+        nr = _Row(new, template)
+        set_cell_value(nr.cells[col_nit], _fmt_nit(base["nit"], nit_sep))
+        if col_ter is not None:
+            set_cell_value(nr.cells[col_ter], base["t"].nombre)
+        if col_des is not None:
+            set_cell_value(nr.cells[col_des], _des_de_rec(b26 if r26 else b25, base["code"], base["t"].nombre))
+        vals = {}
+        for col, role in roles.items():
+            v = _val(role, r26, r25)
+            set_cell_value(nr.cells[col], format_like(v, nr.cells[col]))
+            vals[role] = v
+        rep.added.append((sig, base["nit"], base["t"].nombre, vals))
+        n += 1
+    di, ti = _data_rows(template, hr, col_nit)
+    if ti is not None:
+        for col, role in roles.items():
+            s = sum(parse_money(template.rows[r].cells[col].text) or 0.0 for r in di)
+            set_cell_value(template.rows[ti].cells[col], format_like(s, template.rows[ti].cells[col]))
+    return n
+
+
+def _recompute_variacion(doc):
+    """Recalcula la columna VARIACIÓN = (saldo/acum del periodo) − (comparativo) en
+    cada fila de datos y en el total. General para todas las tablas/sociedades."""
+    for t in doc.tables:
+        hr = _find_header_row(t)
+        if hr is None:
+            continue
+        hdr = t.rows[hr]
+        col_var = next((i for i, c in enumerate(hdr.cells)
+                        if "VARIAC" in _deaccent(c.text.upper())), None)
+        if col_var is None:
+            continue
+        roles = {i: _role_of(c.text) for i, c in enumerate(hdr.cells) if _role_of(c.text)}
+        col_act = next((i for i, r in roles.items() if r in ("actual", "acum_actual")), None)
+        col_comp = next((i for i, r in roles.items() if r == "comparativo"), None)
+        if col_act is None or col_comp is None:
+            continue
+        for r in range(hr + 1, len(t.rows)):
+            cells = t.rows[r].cells
+            if col_var >= len(cells) or col_act >= len(cells) or col_comp >= len(cells):
+                continue
+            a, b = parse_money(cells[col_act].text), parse_money(cells[col_comp].text)
+            if a is None and b is None:
+                continue
+            cv = cells[col_var]
+            if parse_money(cv.text) is None and cv.text.strip():
+                continue                       # no es celda de importe
+            var = (a or 0.0) - (b or 0.0)
+            ex = parse_money(cv.text)
+            if ex is None or abs(ex - var) > ROUND_TOL:
+                set_cell_value(cv, format_like(var, cv))
+
+
+def _eliminar_valorizacion_cero(doc, rep):
+    """Si una tabla de VALORIZACIÓN queda en 0 en el periodo, se elimina (la SAE no
+    presenta valorizaciones en cero). General para todas las sociedades."""
+    for t in list(doc.tables):
+        if "VALORIZAC" not in t.rows[0].cells[0].text.upper():
+            continue
+        hr = _find_header_row(t)
+        if hr is None:
+            continue
+        roles = {i: _role_of(c.text) for i, c in enumerate(t.rows[hr].cells) if _role_of(c.text)}
+        col_act = next((i for i, r in roles.items() if r in ("actual", "acum_actual")), None)
+        if col_act is None:
+            continue
+        vals = [parse_money(t.rows[r].cells[col_act].text) for r in range(hr + 1, len(t.rows))
+                if col_act < len(t.rows[r].cells)]
+        vals = [v for v in vals if v is not None]
+        if vals and all(abs(v) < 1 for v in vals):
+            t._tbl.getparent().remove(t._tbl)
+            rep.flags.append(f"Valorización en 0: se eliminó la tabla '{t.rows[0].cells[0].text.strip()[:40]}'.")
+
+
 def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=False) -> Report:
     rep = Report()
     current_note = None
@@ -1480,12 +1588,22 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
             # Cuentas que se netean (p. ej. retención causada vs pagada): la
             # presentación es a criterio del contador -> solo avisar.
             netea = _es_neteo(scope_records(b26, [c4]), c4) or _es_neteo(scope_records(b25, [c4]), c4)
-            if similar or netea or not crear_faltantes:
+            impuesto = c4[:2] in _IMPUESTO_CLASES or any(c4.startswith(p) for p in _impuesto_scope(n))
+            # Cuenta sin tabla propia: se AGREGA a la tabla existente de la nota (no se
+            # crea tabla nueva) -> p. ej. FINANCIEROS dentro de GASTOS EXTRAORDINARIOS,
+            # OTROS INGRESOS dentro de RECUPERACIONES. Los impuestos y las cuentas que
+            # se netean se dejan para revisión manual (presentación del contador).
+            if netea or impuesto or not _append_orphan(
+                    info[n]["template"],
+                    [r for r in scope_records(b26, [c4]) if r["kind"] == "t"],
+                    [r for r in scope_records(b25, [c4]) if r["kind"] == "t"],
+                    b26, b25, rep, n, titulo):
                 rep.flags.append(f"Nota {n}: la cuenta {c4} '{titulo}' tiene datos en el auxiliar "
                                  f"pero el Word la presenta distinto (revisar manualmente).")
-            else:
-                crear_tabla(info[n]["template"], info[n]["anchor"], titulo, [c4], b26, b25, n, rep)
 
+    # Variación correcta en todas las tablas y eliminación de valorizaciones en 0.
+    _recompute_variacion(doc)
+    _eliminar_valorizacion_cero(doc, rep)
     # Rodar las fechas del período (marzo -> abril, etc.) en narrativa y tablas.
     actualizar_fechas(doc, b26.periodo, rep)
     return rep
