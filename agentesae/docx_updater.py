@@ -154,13 +154,13 @@ def _role_of(header: str):
         return None
     if "MOV" in h:
         return "mov"
-    comparativo = ("2025" in h) or ("ANTERIOR" in h) or año
+    comparativo = ("2025" in h) or ("2024" in h) or ("ANTERIOR" in h) or año
     if "ACUMULAD" in h:
         return "comparativo" if comparativo else "acum_actual"
     if "SALDO" in h:
         if comparativo:
             return "comparativo"
-        if "ACTUAL" in h:
+        if "ACTUAL" in h or "2026" in h:    # 'SALDO MES 2026' = columna del periodo
             return "actual"
     return None
 
@@ -436,6 +436,7 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
     recs25 = scope_records(b25, cfg["scope"])
     allowed = {r["nit"] for r in recs26 + recs25 if r["kind"] == "t"}
     matched_tids = set()
+    matched_keys = set()        # (nit, code) de terceros ya representados por una fila
     covered = set()
 
     data_idx, total_idx = _data_rows(table, header_r, col_nit)
@@ -546,6 +547,9 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             else:
                 covered.add(r26["code"])
                 matched_tids |= r26.get("children", set())
+        for rr in (r26, r25):
+            if rr and rr["kind"] == "t":
+                matched_keys.add((rr["nit"], rr["code"]))
         famcode = (r26 or r25 or {}).get("code")
         for col, role in roles.items():
             cell = row.cells[col]
@@ -566,43 +570,36 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         tr = table.rows[r]._tr
         tr.getparent().remove(tr)
 
-    # Altas: terceros del auxiliar 2026 no emparejados y no cubiertos por una cuenta neta
-    if col_nit is not None and tmpl_tr is not None:
+    # Altas: terceros del auxiliar (2026 y SOLO-2025) no emparejados ni cubiertos.
+    # En tablas de impuestos (add=False) NO se agregan terceros: solo se actualizan
+    # las filas existentes (cada subcuenta/tercero a su valor).
+    if col_nit is not None and tmpl_tr is not None and cfg.get("add", True):
         from docx.table import _Row
         cur, tot = _data_rows(table, header_r, col_nit)
-        last_tr = table.rows[cur[-1]]._tr if cur else None
+        last_tr = [table.rows[cur[-1]]._tr if cur else None]
         tot_tr = table.rows[tot]._tr if (not cur and tot is not None) else None
-        for rec in recs26:
-            if rec["kind"] != "t" or rec["tid"] in matched_tids:
-                continue
-            if any(rec["code"].startswith(cov) for cov in covered):
-                continue
-            if not any(rec["code"].startswith(tc) for tc in target_codes):
-                continue  # solo se agregan terceros de las cuentas ESPECÍFICAS de ESTA tabla
-            if abs(rec["value"]) < 1 and rec["mov"] < 1:
-                continue
-            # descripción de cuenta para la fila nueva: la de una fila hermana de
-            # la misma cuenta (4 díg) o, si no hay, el nombre de la cuenta.
+        shown_nits = {_norm_nit(table.rows[r].cells[col_nit].text) for r in cur}
+        present26 = {(r["nit"], r["code"]) for r in recs26 if r["kind"] == "t"}
+
+        def _add(rec, r25, bal):
             des_new = None
             if col_des is not None:
                 for ri in _data_rows(table, header_r, col_nit)[0]:
-                    rr = match_record(recs26, _norm_nit(table.rows[ri].cells[col_nit].text),
+                    rr = match_record(recs26 + recs25, _norm_nit(table.rows[ri].cells[col_nit].text),
                                       table.rows[ri].cells[col_des].text, None)
-                    if rr and rr["code"][:4] == rec["code"][:4]:
+                    if rr and rr["code"][:6] == rec["code"][:6]:   # misma SUBcuenta (6 díg)
                         des_new = table.rows[ri].cells[col_des].text.strip()
                         break
             if des_new is None:
-                des_new = _des_de_rec(b26, rec["code"], rec["t"].nombre)
-            r25 = find_same25(recs25, rec)
-
+                des_new = _des_de_rec(bal, rec["code"], rec["t"].nombre)
             new_tr = copy.deepcopy(tmpl_tr)
-            if last_tr is not None:
-                last_tr.addnext(new_tr)
+            if last_tr[0] is not None:
+                last_tr[0].addnext(new_tr)
             elif tot_tr is not None:
                 tot_tr.addprevious(new_tr)
             else:
                 table._tbl.append(new_tr)
-            last_tr = new_tr
+            last_tr[0] = new_tr
             nrow = _Row(new_tr, table)
             set_cell_value(nrow.cells[col_nit], _fmt_nit(rec["nit"], nit_sep))
             if col_ter is not None:
@@ -610,11 +607,31 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             if col_des is not None:
                 set_cell_value(nrow.cells[col_des], des_new)
             vals = {}
+            r26 = rec if bal is b26 else None
             for col, role in roles.items():
-                v = _val(role, rec, r25)
+                v = _val(role, r26, r25)
                 set_cell_value(nrow.cells[col], format_like(v, nrow.cells[col]))
                 vals[role] = v
+            shown_nits.add(rec["nit"])
             rep.added.append((cfg["sig"], rec["nit"], rec["t"].nombre, vals))
+
+        def _addable(rec):
+            return (rec["kind"] == "t"
+                    and not any(rec["code"].startswith(cov) for cov in covered)
+                    and any(rec["code"].startswith(tc) for tc in target_codes))
+
+        for rec in recs26:                              # terceros del periodo (2026)
+            if not _addable(rec) or rec["tid"] in matched_tids:
+                continue
+            if abs(rec["value"]) < 1 and rec["mov"] < 1:
+                continue
+            _add(rec, find_same25(recs25, rec), b26)
+        for rec in recs25:                              # terceros SOLO del comparativo (2025)
+            if (rec["nit"], rec["code"]) in present26 or (rec["nit"], rec["code"]) in matched_keys:
+                continue
+            if not _addable(rec) or abs(rec["value"]) < 1:
+                continue
+            _add(rec, rec, b25)
 
     # Recalcular fila de total = suma de filas de datos mostradas
     data_idx, total_idx = _data_rows(table, header_r, col_nit)
@@ -650,6 +667,206 @@ def _best_sub(subs, label):
         if sc > bs or (sc == bs and best is not None and len(c.codigo) < len(best.codigo)):
             bs, best = sc, c
     return best if bs > 0 else None
+
+
+# Clases del PUC que se presentan a nivel de CUENTA/SUBCUENTA (no de tercero):
+# impuestos por pagar (24), obligaciones laborales (25), pasivos estimados (26)
+# y el anticipo de impuestos del activo (1355). En estas tablas cada fila es una
+# SUBCUENTA (impuesto de renta, IVA, ICA, predial...) y su valor es el de la
+# subcuenta —NO la suma de sus terceros— y NO se agregan terceros.
+_IMPUESTO_CLASES = {"24", "25", "26"}
+
+
+def _impuesto_scope(nota: str):
+    if nota in ("4",):
+        return ["24", "25", "26"]
+    if nota in ("2",):
+        return ["1355"]
+    return []
+
+
+def _subcuentas_valor(b26, b25, clases, niveles=(4, 6)):
+    """Subcuentas (por defecto 4/6 díg) de esas clases con su saldo en ambos años."""
+    out = {}
+    for bal in (b26, b25):
+        for c in bal.cuentas.values():
+            if len(c.codigo) in niveles and any(c.codigo.startswith(p) for p in clases):
+                out.setdefault(c.codigo, c)
+    return out
+
+
+def _es_tabla_impuestos(table, header_r, b26, b25, nota):
+    """True si la tabla se debe tratar a nivel de subcuenta de impuestos: la mayoría
+    de sus filas (por descripción) casan con una subcuenta de impuestos (24/25/26 ó
+    1355). Distingue 'IMPUESTOS POR PAGAR' (subcuentas por tipo de impuesto) de
+    'cuentas por pagar/honorarios' (terceros) y de 'multas y sanciones' (cuyas
+    subcuentas no se nombran por tipo de impuesto)."""
+    clases = _impuesto_scope(nota)
+    if not clases:
+        return False
+    # 'Multas y sanciones' / 'provisiones' / 'contingencias' (pasivos estimados) NO
+    # son la tabla de impuestos por pagar: sus subcuentas no se nombran por tipo de
+    # impuesto y se emparejan por tercero/valor (no por subcuenta).
+    titulo = table.rows[0].cells[0].text.upper()
+    if any(k in titulo for k in ("MULTA", "SANCION", "PROVISION", "CONTINGENC")):
+        return False
+    subs = list(_subcuentas_valor(b26, b25, clases).values())
+    if not subs:
+        return False
+    # Por TÍTULO: 'IMPUESTO(S)...' / 'IVA' / 'ANTICIPO DE IMPUESTOS' son tablas de
+    # impuestos (también las de una sola subcuenta: 'IMPUESTO POR PAGAR - IVA').
+    if "IMPUESTO" in titulo or re.search(r"\bIVA\b", titulo):
+        return True
+    hdr = table.rows[header_r]
+    col_des = _col_index(hdr, "DESCRIPCION", "DESCRICION", "DES CUENTA", "DES CUE")
+    if col_des is None:
+        return False
+    n_rows = n_match = 0
+    for r in range(header_r + 1, len(table.rows)):
+        des = table.rows[r].cells[col_des].text.strip()
+        if not des:
+            continue
+        n_rows += 1
+        sub = _best_sub(subs, des)
+        if sub is not None and any(sub.codigo.startswith(p) for p in clases):
+            n_match += 1
+    return n_rows > 0 and n_match >= max(1, (n_rows + 1) // 2)
+
+
+def _nits_distintos(table, header_r):
+    """True si las filas de datos tienen NITs DISTINTOS entre sí (terceros reales,
+    p. ej. predial por municipio). False si el mismo NIT se repite o hay uno solo
+    (una subcuenta presentada en una/varias filas: IVA, renta, anticipo)."""
+    col_nit = _col_index(table.rows[header_r], "CEDULA", "CÉDULA", "ID,")
+    if col_nit is None:
+        return False
+    nits = []
+    for r in range(header_r + 1, len(table.rows)):
+        nn = _norm_nit(table.rows[r].cells[col_nit].text)
+        if nn:
+            nits.append(nn)
+    return len(nits) > 1 and len(set(nits)) == len(nits)
+
+
+def process_impuestos(table, cfg, b26, b25, rep: Report):
+    """Tabla de impuestos a nivel de SUBCUENTA. Cada fila se mapea a una subcuenta
+    (por descripción y, si sobran, por eliminación) y toma SU saldo —no la suma de
+    terceros—. No agrega terceros. El total = suma de las filas mostradas."""
+    nota = cfg.get("nota", "")
+    clases = _impuesto_scope(nota) or cfg.get("scope", [])
+    header_r = _find_header_row(table)
+    if header_r is None:
+        return
+    hdr = table.rows[header_r]
+    roles = {i: _role_of(c.text) for i, c in enumerate(hdr.cells) if _role_of(c.text)}
+    if not roles:
+        return
+    col_des = _col_index(hdr, "DESCRIPCION", "DESCRICION", "DES CUENTA", "DES CUE")
+    col_nit = _col_index(hdr, "CEDULA", "CÉDULA", "ID,")
+
+    data, total = [], None
+    for r in range(header_r + 1, len(table.rows)):
+        row = table.rows[r]
+        if not any(parse_money(c.text) is not None for _, c in _unique_grid(row)):
+            continue
+        des = row.cells[col_des].text.strip() if col_des is not None else ""
+        nit = _norm_nit(row.cells[col_nit].text) if col_nit is not None else ""
+        if des or nit:
+            data.append((r, des))
+        elif total is None:
+            total = r
+
+    def _val(bal, code):
+        return abs(bal.saldo(code))
+
+    def _set(cell, val):
+        ex = parse_money(cell.text)
+        if ex is not None and abs(ex - val) <= ROUND_TOL:
+            return
+        a = cell.text.strip()
+        n = format_like(val, cell)
+        if a != n:
+            set_cell_value(cell, n)
+            rep.chg(nota, cfg["sig"], "impuesto", "col", a, n)
+
+    def _set_row(r, code):
+        c26, c25 = b26.cuentas.get(code), None
+        for col, role in roles.items():
+            if role == "mov":
+                val = abs(c26.debito - c26.credito) if c26 else 0.0
+            else:
+                val = _val(b25 if role == "comparativo" else b26, code)
+            _set(table.rows[r].cells[col], val)
+
+    # Subcuenta(s) que ESTA tabla representa, según su TÍTULO (sin el texto repetido
+    # 'IMPUESTO(S) POR PAGAR'): p. ej. '... - IVA' -> 2408, '... - RENTA' -> 2404.
+    boiler = {"IMPUESTO", "IMPUESTOS", "POR", "PAGAR", "ANTICIPO", "CONTRIBUCIONES",
+              "SALDOS", "FAVOR", "PESOS", "EXPRESADO"}
+    titulo = table.rows[0].cells[0].text.upper()
+    if re.search(r"\bIVA\b", titulo):
+        titulo += " VENTAS"           # IVA = impuesto a las VENTAS (2408)
+    ttoks = _toks(titulo) - boiler
+    allsubs = _subcuentas_valor(b26, b25, clases, niveles=(4, 6))
+    anchor, aov = None, 0
+    for c in allsubs.values():
+        ov = len(ttoks & (_toks(c.nombre) - boiler))
+        if ov > aov or (ov == aov and anchor and ov > 0 and len(c.codigo) < len(anchor)):
+            aov, anchor = ov, c.codigo
+    if aov == 0:
+        anchor = None
+
+    # Subcuentas de presentación del ámbito: nivel 6 díg con saldo y, para cuentas de
+    # 4 díg que no tienen hijas de 6 díg con saldo, la propia de 4 díg.
+    def _leaves(pref):
+        with_val = {k for k in allsubs
+                    if (pref is None or k.startswith(pref))
+                    and (abs(b26.saldo(k)) > 0 or abs(b25.saldo(k)) > 0)}
+        sixes = [k for k in with_val if len(k) == 6]
+        fours = [k for k in with_val if len(k) == 4 and not any(s.startswith(k) for s in sixes)]
+        return sorted(sixes + fours)
+
+    leaves = _leaves(anchor)
+
+    if anchor and len(data) == 1:
+        # Tabla de UNA subcuenta (p. ej. 'IMPUESTO POR PAGAR - IVA'): se usa el saldo
+        # de la cuenta de 4 díg (NETO de IVA generado/descontable, etc.).
+        _set_row(data[0][0], anchor)
+    elif data and len(data) == len(leaves):
+        # 1-a-1: por descripción y, lo que sobre, por eliminación (resuelve
+        # 'AUTORRETENCION' -> 135515 cuando hay tantas filas como subcuentas).
+        libres = list(leaves)
+        pend = []
+        for r, des in data:
+            sub = _best_sub([c for k, c in allsubs.items() if k in libres], des)
+            if sub is not None:
+                _set_row(r, sub.codigo)
+                libres.remove(sub.codigo)
+            else:
+                pend.append(r)
+        for r in pend:
+            if libres:
+                _set_row(r, libres.pop(0))
+    elif anchor and data:
+        # UNA subcuenta con varias filas (p. ej. vigencias de renta que ya suman la
+        # subcuenta): se dejan las filas (do-no-harm) y solo se cuadra el total.
+        pass
+    else:
+        # Genérica (varias subcuentas por nombre, p. ej. cuenta 24): cada fila a su
+        # subcuenta por descripción si la coincidencia es clara.
+        for r, des in data:
+            sub = _best_sub([c for c in allsubs.values()], des)
+            if sub is not None and len(_toks(des) & _toks(sub.nombre)) >= 1:
+                _set_row(r, sub.codigo)
+
+    if total is not None:
+        for col, role in roles.items():
+            if anchor and not (data and len(data) == len(leaves)):
+                val = (abs(b26.cuentas[anchor].debito - b26.cuentas[anchor].credito)
+                       if role == "mov" and anchor in b26.cuentas
+                       else _val(b25 if role == "comparativo" else b26, anchor))
+            else:
+                val = sum(parse_money(table.rows[r].cells[col].text) or 0.0 for r, _ in data)
+            _set(table.rows[total].cells[col], val)
 
 
 def _cuenta_class(title, default):
@@ -1178,7 +1395,7 @@ def actualizar_fechas(doc, periodo: str, rep=None) -> int:
     return n
 
 
-def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=True) -> Report:
+def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crear_faltantes=False) -> Report:
     rep = Report()
     current_note = None
     info = {n: {"template": None, "anchor": None, "matched": set(), "accounts": set(),
@@ -1203,7 +1420,18 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
                 clase = NOTE_CONFIG[n]["clase"]
                 kind = _detect_kind(table, hr)
                 info[n]["titles"].append(up)        # título de CUALQUIER sub-tabla
-                if kind == "terceros":
+                if kind == "terceros" and _es_tabla_impuestos(table, hr, b26, b25, n):
+                    # Tabla de impuestos: NUNCA se agregan terceros. Si sus filas son
+                    # terceros DISTINTOS (p. ej. predial por municipio) se actualiza
+                    # cada uno (process_terceros sin altas); si es una subcuenta con
+                    # el mismo NIT repetido / una sola fila (IVA, renta, anticipo) se
+                    # toma el valor de la SUBCUENTA (process_impuestos).
+                    if _nits_distintos(table, hr):
+                        process_terceros(table, dict(nota=n, sig=title, scope=clase, add=False),
+                                         b26, b25, rep)
+                    else:
+                        process_impuestos(table, dict(nota=n, sig=title, scope=clase), b26, b25, rep)
+                elif kind == "terceros":
                     info[n]["template"] = table
                     cnit = _col_index(table.rows[hr], "CEDULA", "CÉDULA", "ID,")
                     if cnit is not None:               # NITs presentes en el Word
