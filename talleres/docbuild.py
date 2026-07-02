@@ -213,6 +213,16 @@ def answer_text(doc, text, label='Respuesta:'):
     borders.append(left); tcPr.append(borders)
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
 
+def step(doc, n, text):
+    """A brief, numbered step explanation (concise) rendered above an equation."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(3); p.paragraph_format.space_after = Pt(1)
+    p.paragraph_format.left_indent = Cm(0.3)
+    lab = p.add_run(f"Step {n}.  "); lab.bold = True; lab.font.size = Pt(10.5)
+    lab.font.color.rgb = ACCENT
+    tr = p.add_run(text); tr.font.size = Pt(10.5); tr.font.color.rgb = RGBColor(0x33,0x33,0x33)
+    return p
+
 def image(doc, path, width_cm=10.5, caption=None):
     p = doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.add_run().add_picture(path, width=Cm(width_cm))
