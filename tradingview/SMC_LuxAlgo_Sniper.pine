@@ -9,7 +9,7 @@
 // -------------------------------------------------------------------------------------
 
 //@version=6
-indicator('Smart Money Concepts [LuxAlgo] + Sniper', 'LuxAlgo - Smart Money Concepts + Sniper', overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+indicator('Smart Money Concepts [LuxAlgo] + Sniper', 'SMC Sniper', overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
 
 //---------------------------------------------------------------------------------------------------------------------}
 //CONSTANTS & STRINGS & INPUTS
@@ -451,7 +451,8 @@ deleteOrderBlocks(bool internal = false) =>
 
 // @function fetch and store order blocks
 // @returns void
-storeOrdeBlock(pivot p_ivot, bool internal = false, int bias = BULLISH) =>
+// Pine solo admite literales como default (1 = BULLISH); todas las llamadas pasan bias explícito
+storeOrdeBlock(pivot p_ivot, bool internal = false, int bias = 1) =>
     if (not internal and showSwingOrderBlocksInput) or (internal and showInternalOrderBlocksInput)
         array<float> a_rray = na
         int parsedIndex = na
