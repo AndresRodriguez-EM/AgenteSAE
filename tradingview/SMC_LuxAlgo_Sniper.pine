@@ -779,6 +779,9 @@ alertcondition(currentAlerts.bearishFairValueGap, 'Bearish FVG', 'Bearish FVG fo
 // =====================================================================================
 grp_sniper = "🎯 Sniper Settings"
 show_hist = input.bool(true, "Mostrar Histórico de Señales", group = grp_sniper)
+compact_labels_sn = input.bool(true, "Etiquetas compactas (detalle completo en el tooltip al pasar el mouse)", group = grp_sniper)
+max_hist_sn = input.int(30, "Máximo de señales históricas con etiqueta", minval = 1, maxval = 200, group = grp_sniper)
+show_marks_sn = input.bool(true, "Marcas de señal persistentes (triángulos, no se borran al desplazar)", group = grp_sniper)
 risk_usd = input.float(500.0, "Riesgo por Operación ($)", group = grp_sniper)
 rr_sniper = input.float(2.0, "Ratio Riesgo/Beneficio", group = grp_sniper)
 
@@ -856,6 +859,8 @@ short_sn = in_time and c_dn and trending_ok_sn and bar_confirmed_sn and smc_tren
 
 // 4. Gestión de Etiquetas e Histórico
 var label last_signal_lbl = na
+var array<label> histSignalLabels_sn = array.new<label>()
+var array<label> histResultLabels_sn = array.new<label>()
 
 if long_sn or short_sn
     if not show_hist
@@ -883,11 +888,12 @@ if long_sn or short_sn
     float pad_sn = close * 0.0015
     float y_pos_sn = long_sn ? low - pad_sn : high + pad_sn
 
-    string text_sn = (long_sn ? "▲ COMPRA " : "▼ VENTA ") + str.tostring(ent_sn, "#.##") +
+    string full_text_sn = (long_sn ? "▲ COMPRA " : "▼ VENTA ") + str.tostring(ent_sn, "#.##") +
       "\nSL: " + str.tostring(sl_sn, "#.##") +
       " | TP: " + str.tostring(tp_sn, "#.##") +
       "\nLote: " + str.tostring(lote_p, "0.00") +
       " | Fuerza: " + str.tostring(strength_score_sn * 100, "0") + "%"
+    string text_sn = compact_labels_sn ? (long_sn ? "▲ " : "▼ ") + str.tostring(ent_sn, "#.##") : full_text_sn
     string tip_sn = "Entrada: " + str.tostring(ent_sn, "#.##") +
       "\nSL: " + str.tostring(sl_sn, "#.##") +
       "\nTP: " + str.tostring(tp_sn, "#.##") +
@@ -902,7 +908,12 @@ if long_sn or short_sn
       color = color.new(long_sn ? color.green : color.red, 75),
       textcolor = color.white,
       style = long_sn ? label.style_label_up : label.style_label_down,
-      size = size.small)
+      size = compact_labels_sn ? size.tiny : size.small)
+
+    if show_hist
+        histSignalLabels_sn.push(last_signal_lbl)
+        if histSignalLabels_sn.size() > max_hist_sn
+            label.delete(histSignalLabels_sn.shift())
 
     inTrade_sn := true
     tradeEntry_sn := ent_sn
@@ -923,6 +934,11 @@ if long_sn or short_sn
 // alertcondition() debe estar SIEMPRE en el ámbito global (no dentro de un if)
 alertcondition(long_sn, "BUY Sniper", "COMPRA en {{close}}")
 alertcondition(short_sn, "SELL Sniper", "VENTA en {{close}}")
+
+// Marcas persistentes: los plots no consumen el límite de 500 etiquetas, por lo que
+// siguen visibles en todo el histórico aunque las etiquetas antiguas se depuren
+plotshape(show_marks_sn and long_sn, title = "Señal COMPRA (marca)", location = location.belowbar, color = color.new(color.green, 0), style = shape.triangleup, size = size.tiny)
+plotshape(show_marks_sn and short_sn, title = "Señal VENTA (marca)", location = location.abovebar, color = color.new(color.red, 0), style = shape.triangledown, size = size.tiny)
 
 // =====================================================================================
 // MONITOR DE GANANCIA FLOTANTE — avisa cuando la posicion abierta llega a la meta
@@ -961,12 +977,17 @@ if inTrade_sn
           color = color.new(won_sn ? color.green : color.red, 15),
           textcolor = color.white,
           style = tradeIsLong_sn ? label.style_label_down : label.style_label_up,
-          size = size.small)
+          size = compact_labels_sn ? size.tiny : size.small)
+
+        if show_hist
+            histResultLabels_sn.push(resultLabel_sn)
+            if histResultLabels_sn.size() > max_hist_sn
+                label.delete(histResultLabels_sn.shift())
 
 // =====================================================================================
 // DIAGNÓSTICO
 // =====================================================================================
-show_diag_sn = input.bool(true, "Mostrar diagnostico de cruces bloqueados", group = grp_sniper)
+show_diag_sn = input.bool(false, "Mostrar diagnostico de cruces bloqueados (consume muchas etiquetas)", group = grp_sniper)
 
 raw_cross_up_sn = bar_confirmed_sn and c_up
 raw_cross_dn_sn = bar_confirmed_sn and c_dn
