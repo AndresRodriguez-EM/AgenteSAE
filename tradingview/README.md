@@ -1,3 +1,14 @@
+# Indicadores TradingView (Pine Script v6)
+
+Contenido de esta carpeta:
+
+| Archivo | Descripción |
+|---------|-------------|
+| [`XAUUSD_TrendPullback_RSI_ATR.pine`](./XAUUSD_TrendPullback_RSI_ATR.pine) | Indicador propio: Tendencia (EMA 200/50) + Pullback + RSI + cajas SL/TP por ATR |
+| [`SMC_LuxAlgo_Sniper.pine`](./SMC_LuxAlgo_Sniper.pine) | Smart Money Concepts de © LuxAlgo (CC BY-NC-SA 4.0) reorganizado a Pine v6 + módulo "🎯 Sniper" personalizado (señales por cruce RSI/SMA, SL/TP por ATR o estructura, lotaje dinámico, monitor de ganancia flotante y diagnóstico de señales bloqueadas). **Licencia**: uso no comercial, se debe mantener la atribución a LuxAlgo y compartir las modificaciones bajo la misma licencia. |
+
+---
+
 # Oro XAU/USD — Tendencia + Pullback + RSI + ATR (Pine Script v6)
 
 Indicador para **TradingView** diseñado para operar **Oro (XAU/USD)** en temporalidades de
