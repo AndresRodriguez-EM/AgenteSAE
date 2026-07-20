@@ -9,7 +9,9 @@
 // -------------------------------------------------------------------------------------
 
 //@version=6
-indicator('Smart Money Concepts [LuxAlgo] + Sniper', 'SMC Sniper', overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+// calc_bars_count fija la ventana de cálculo a las últimas N velas: al desplazar el
+// gráfico y cargar más histórico, el cálculo no cambia y los dibujos dejan de moverse
+indicator('Smart Money Concepts [LuxAlgo] + Sniper', 'SMC Sniper', overlay = true, max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500, calc_bars_count = 5000)
 
 //---------------------------------------------------------------------------------------------------------------------}
 //CONSTANTS & STRINGS & INPUTS
@@ -964,6 +966,8 @@ if inTrade_sn
 
     if hitTP_sn or hitSL_sn
         inTrade_sn := false
+        if not na(liveLabel_sn)
+            label.delete(liveLabel_sn)
         if not na(rewardBox_sn)
             box.set_right(rewardBox_sn, bar_index)
         if not na(riskBox_sn)
