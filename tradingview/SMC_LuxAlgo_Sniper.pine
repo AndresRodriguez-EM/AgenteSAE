@@ -693,9 +693,10 @@ drawPremiumDiscountZones() =>
 //---------------------------------------------------------------------------------------------------------------------}
 //MUTABLE VARIABLES & EXECUTION
 //---------------------------------------------------------------------------------------------------------------------{
-parsedOpen = showTrendInput ? open : na
+// Todos los valores en na cuando está desactivado: así el plot invisible no participa
+// en el auto-escalado del eje de precios ni ensucia la línea de estado
 candleColor = internalTrend.bias == BULLISH ? swingBullishColor : swingBearishColor
-plotcandle(parsedOpen, high, low, close, color = candleColor, wickcolor = candleColor, bordercolor = candleColor)
+plotcandle(showTrendInput ? open : na, showTrendInput ? high : na, showTrendInput ? low : na, showTrendInput ? close : na, color = candleColor, wickcolor = candleColor, bordercolor = candleColor)
 
 if showHighLowSwingsInput or showPremiumDiscountZonesInput
     updateTrailingExtremes()
@@ -939,8 +940,8 @@ alertcondition(short_sn, "SELL Sniper", "VENTA en {{close}}")
 
 // Marcas persistentes: los plots no consumen el límite de 500 etiquetas, por lo que
 // siguen visibles en todo el histórico aunque las etiquetas antiguas se depuren
-plotshape(show_marks_sn and long_sn, title = "Señal COMPRA (marca)", location = location.belowbar, color = color.new(color.green, 0), style = shape.triangleup, size = size.tiny)
-plotshape(show_marks_sn and short_sn, title = "Señal VENTA (marca)", location = location.abovebar, color = color.new(color.red, 0), style = shape.triangledown, size = size.tiny)
+plotshape(show_marks_sn and long_sn, title = "Señal COMPRA (marca)", location = location.belowbar, color = color.new(color.green, 0), style = shape.triangleup, size = size.tiny, display = display.pane)
+plotshape(show_marks_sn and short_sn, title = "Señal VENTA (marca)", location = location.abovebar, color = color.new(color.red, 0), style = shape.triangledown, size = size.tiny, display = display.pane)
 
 // =====================================================================================
 // MONITOR DE GANANCIA FLOTANTE — avisa cuando la posicion abierta llega a la meta
@@ -1002,8 +1003,10 @@ blocked_dn_sn = show_diag_sn and raw_cross_dn_sn and not short_sn
 reason_up_sn = not in_time ? "Fuera de horario" : not trending_ok_sn ? "ADX bajo (rango)" : not smc_trend_ok_up ? "Tendencia SMC en contra" : not internal_trend_ok_up ? "Estructura interna en contra" : not rsi_buy_ok_sn ? "RSI no suficientemente bajo" : "Otro"
 reason_dn_sn = not in_time ? "Fuera de horario" : not trending_ok_sn ? "ADX bajo (rango)" : not smc_trend_ok_dn ? "Tendencia SMC en contra" : not internal_trend_ok_dn ? "Estructura interna en contra" : "Otro"
 
-plotshape(blocked_up_sn, title = "CruceBloqueadoCompra", location = location.bottom, color = color.new(color.gray, 30), style = shape.xcross, size = size.tiny)
-plotshape(blocked_dn_sn, title = "CruceBloqueadoVenta", location = location.top, color = color.new(color.gray, 30), style = shape.xcross, size = size.tiny)
+// Ancladas al precio (belowbar/abovebar): location.top/bottom se pegan al borde del
+// panel y se deslizan sobre las velas al desplazar el gráfico en vertical
+plotshape(blocked_up_sn, title = "CruceBloqueadoCompra", location = location.belowbar, color = color.new(color.gray, 30), style = shape.xcross, size = size.tiny, display = display.pane)
+plotshape(blocked_dn_sn, title = "CruceBloqueadoVenta", location = location.abovebar, color = color.new(color.gray, 30), style = shape.xcross, size = size.tiny, display = display.pane)
 
 if blocked_up_sn
     label.new(bar_index, low, text = "X", tooltip = "Cruce COMPRA bloqueado: " + reason_up_sn, color = color.new(color.gray, 80), textcolor = color.gray, style = label.style_label_up, size = size.tiny)
