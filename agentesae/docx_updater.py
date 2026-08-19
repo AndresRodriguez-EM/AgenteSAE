@@ -327,6 +327,12 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None, used=
         if et:
             return _pick(et, des, hint)
         ea = [r for r in ac if _round(abs(r["value"])) == rh]
+        # Si el NIT tiene su propio tercero y la cuenta que cuadra por valor tiene
+        # VARIOS terceros, la fila es por-tercero (p. ej. cuotas de administración por
+        # persona): se usa el tercero, NO el total de la cuenta (el valor del Word
+        # puede estar viejo y coincidir por casualidad con el total).
+        if ea and tc and any(len(r.get("child_nits", set())) > 1 for r in ea):
+            return _pick(tc, des, hint)
         if ea:
             return _pick(ea, des, hint)
     if tc:
@@ -576,6 +582,15 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             an = _toks(r26["des"][-1]) if r26.get("des") else set()
             if an and not (_toks(_des_imp(des)) & an):
                 r26 = r25 = None
+        # En una tabla POR-TERCERO (varias filas), una fila NO representa el TOTAL de
+        # una cuenta de VARIOS terceros: si solo cuadró con esa cuenta (su tercero está
+        # ausente o ya lo tomó otra fila duplicada), queda en 0 y NO marca como usados a
+        # los demás terceros. (Se exceptúan las cuentas que se NETEAN, donde el Word sí
+        # muestra el total neto.)
+        if (r26 is not None and r26.get("kind") == "acc" and len(data_idx) > 1
+                and len(r26.get("child_nits", set())) > 1
+                and not (_es_neteo(recs26, r26["code"][:4]) or _es_neteo(recs25, r26["code"][:4]))):
+            r26 = r25 = None
         if r26 is None and r25 is None and nit:
             # ¿La 'cédula' es en realidad un código de cuenta? (filas por cuenta)
             r26 = _account_code_rec(b26, nit, cfg["scope"])
