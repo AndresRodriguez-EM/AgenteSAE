@@ -294,7 +294,7 @@ def _pick(cands, des, hint):
     return min(top, key=lambda r: abs(abs(r["value"]) - abs(hint)))
 
 
-def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None):
+def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None, used=None):
     """Empareja una fila del Word con un registro del auxiliar. Prioridad:
     1) tercero del mismo NIT con valor exacto; 2) cuenta con valor exacto;
     3) tercero del mismo NIT por descripción/proximidad; 4) cuenta por descripción;
@@ -303,6 +303,11 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None):
     El emparejamiento a nivel de CUENTA (filas que el Word presenta consolidadas)
     solo se permite si el NIT de la fila corresponde a un tercero real del
     auxiliar; así una fila cuyo tercero ya no existe queda sin match (se elimina)."""
+    # Un tercero ya usado por otra fila no se vuelve a emparejar (evita que dos filas
+    # con el MISMO nombre —p. ej. 'CAMARA DE COMERCIO' con dos NIT— tomen el mismo
+    # valor por el emparejamiento por nombre).
+    if used:
+        recs = [r for r in recs if not (r["kind"] == "t" and r.get("tid") in used)]
     tc = [r for r in recs if r["kind"] == "t" and r["nit"] == nit]
     # A nivel de cuenta solo si el NIT pertenece a esa cuenta (es uno de sus terceros).
     ac = [r for r in recs if r["kind"] == "acc" and nit in r.get("child_nits", set())]
@@ -522,16 +527,21 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         scope_pref = tgt or anchor
         sub26 = [x for x in recs26 if x["code"].startswith(scope_pref)] if scope_pref else recs26
         sub25 = [x for x in recs25 if x["code"].startswith(scope_pref)] if scope_pref else recs25
-        r26 = match_record(sub26, nit, des, hint26, tname=tname)
+        r26 = match_record(sub26, nit, des, hint26, tname=tname, used=matched_tids)
         # Si dentro del ancla no hay pareja para el NIT (fila de una cuenta AJENA al
         # ancla, p. ej. FINANCIEROS agregada en la tabla de GASTOS EXTRAORDINARIOS),
         # se reintenta en TODA la clase de la nota, pero SOLO si aparece un TERCERO real
         # (no la cuenta padre por coincidencia de valor): así una subcuenta que ya no
         # existe en el auxiliar queda en 0 y no hereda el total del padre.
         if r26 is None and scope_pref:
-            fb = match_record(recs26, nit, des, hint26, tname=tname)
+            fb = match_record(recs26, nit, des, hint26, tname=tname, used=matched_tids)
             if fb is not None and fb.get("kind") == "t":
-                r26 = fb
+                fn = _toks(fb["des"][-1]) if fb.get("des") else set()
+                # el nombre de la cuenta del tercero debe ser COMPATIBLE con la
+                # descripción (evita emparejar 'SERVICIOS PUBLICOS' con la deuda
+                # quirografaria del mismo tercero, que es otra cuenta).
+                if not _toks(des) or (_toks(_des_imp(des)) & fn):
+                    r26 = fb
         # Fila que representa una CUENTA sin terceros (etiquetada con un NIT
         # representativo, p. ej. 'ANTICIPO IMPUESTO DE RENTA' = 135505, que en el
         # auxiliar no tiene tercero): se usa el saldo de la propia cuenta. Solo si el
