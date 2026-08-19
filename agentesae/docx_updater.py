@@ -306,6 +306,16 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None):
     tc = [r for r in recs if r["kind"] == "t" and r["nit"] == nit]
     # A nivel de cuenta solo si el NIT pertenece a esa cuenta (es uno de sus terceros).
     ac = [r for r in recs if r["kind"] == "acc" and nit in r.get("child_nits", set())]
+    # Si la DESCRIPCIÓN de la fila identifica con fuerza (>=2 palabras) la SUBcuenta
+    # de un tercero del mismo NIT, se usa ESE tercero —aunque su valor sea 0— en vez
+    # de la cuenta padre cuyo saldo coincida con un valor viejo del Word (p. ej.
+    # 'RETENCION ASUMIDA' de la DIAN -> su subcuenta, no el total de 'IMPUESTOS
+    # ASUMIDOS'). Solo aplica cuando distingue entre varias subcuentas del NIT.
+    dw = _toks(des)
+    if len(dw) >= 2 and len({r["code"] for r in tc}) > 1:
+        dm = [r for r in tc if max((len(dw & _toks(x)) for x in r["des"]), default=0) >= 2]
+        if dm:
+            return _pick(dm, des, hint)
     rh = _round(abs(hint)) if hint else None
     if rh is not None:
         et = [r for r in tc if _round(abs(r["value"])) == rh]
@@ -377,12 +387,14 @@ def _accept_set(recs_year, prim, nit, role, famcode):
     a nivel de cuenta de la misma familia). Si el valor actual del Word ya está
     en este conjunto, la celda es correcta y no se modifica ('do no harm')."""
     out = set()
-    # Solo el registro emparejado (prim) y los netos de su familia de cuenta;
-    # NO todos los terceros del mismo NIT (eso aceptaba valores ajenos, p. ej.
-    # el movimiento 0 de otro tercero de la DIAN).
-    for r in recs_year:
-        if r["kind"] == "acc" and famcode and famcode.startswith(r["code"]):
-            out.add(_round(r["mov"] if role == "mov" else abs(r["value"])))
+    # El valor de una cuenta PADRE solo se acepta como 'ya correcto' cuando esa
+    # familia se NETEA (p. ej. IVA generado vs descontable): el Word muestra el neto.
+    # Si NO netea, aceptar el total del padre haría que una fila-hoja que en realidad
+    # vale 0 se quedara con el total viejo del padre (bug de 'gastos asumidos').
+    if famcode and _es_neteo(recs_year, famcode[:4]):
+        for r in recs_year:
+            if r["kind"] == "acc" and famcode.startswith(r["code"]):
+                out.add(_round(r["mov"] if role == "mov" else abs(r["value"])))
     if prim:
         out.add(_round(prim["mov"] if role == "mov" else abs(prim["value"])))
     return out
@@ -511,6 +523,15 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         sub26 = [x for x in recs26 if x["code"].startswith(scope_pref)] if scope_pref else recs26
         sub25 = [x for x in recs25 if x["code"].startswith(scope_pref)] if scope_pref else recs25
         r26 = match_record(sub26, nit, des, hint26, tname=tname)
+        # Si dentro del ancla no hay pareja para el NIT (fila de una cuenta AJENA al
+        # ancla, p. ej. FINANCIEROS agregada en la tabla de GASTOS EXTRAORDINARIOS),
+        # se reintenta en TODA la clase de la nota, pero SOLO si aparece un TERCERO real
+        # (no la cuenta padre por coincidencia de valor): así una subcuenta que ya no
+        # existe en el auxiliar queda en 0 y no hereda el total del padre.
+        if r26 is None and scope_pref:
+            fb = match_record(recs26, nit, des, hint26, tname=tname)
+            if fb is not None and fb.get("kind") == "t":
+                r26 = fb
         # Fila que representa una CUENTA sin terceros (etiquetada con un NIT
         # representativo, p. ej. 'ANTICIPO IMPUESTO DE RENTA' = 135505, que en el
         # auxiliar no tiene tercero): se usa el saldo de la propia cuenta. Solo si el
@@ -523,7 +544,28 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             acc4 = next((x for x in sub26 if x["kind"] == "acc" and x["code"] == tgt[:4]), None)
             if acc4 is not None:
                 r26 = acc4
-        r25 = find_same25(sub25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
+        # Si la fila quedó emparejada solo con la cuenta PADRE pero su descripción
+        # nombra una SUBcuenta específica (que en el auxiliar puede estar en 0 y sin
+        # tercero), se usa el saldo de esa subcuenta (evita heredar el total del padre).
+        esp = _sub_por_des(b26, des, r26["code"]) if (r26 and r26.get("kind") == "acc") else None
+        if esp and esp != r26["code"] and esp.startswith(r26["code"]):
+            def _acc(bal, code):
+                cc = bal.cuentas.get(code)
+                return dict(kind="acc", code=code, value=bal.saldo(code),
+                            mov=abs(cc.debito - cc.credito) if cc else 0.0,
+                            des=[cc.nombre] if cc else [], child_nits=set())
+            r26 = _acc(b26, esp)
+            r25 = _acc(b25, esp)
+        else:
+            r25 = find_same25(recs25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
+        # Emparejó con una CUENTA por coincidencia con un valor VIEJO del Word, pero su
+        # descripción (>=2 palabras) no comparte ninguna con el nombre de esa cuenta: la
+        # subcuenta que nombra la fila ya no está en el auxiliar -> la fila queda en 0.
+        # (Solo aplica a emparejamientos a nivel de cuenta; los de tercero se respetan.)
+        if r26 is not None and r26.get("kind") == "acc" and len(_toks(des)) >= 2:
+            an = _toks(r26["des"][-1]) if r26.get("des") else set()
+            if an and not (_toks(_des_imp(des)) & an):
+                r26 = r25 = None
         if r26 is None and r25 is None and nit:
             # ¿La 'cédula' es en realidad un código de cuenta? (filas por cuenta)
             r26 = _account_code_rec(b26, nit, cfg["scope"])
@@ -580,6 +622,11 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         tot_tr = table.rows[tot]._tr if (not cur and tot is not None) else None
         shown_nits = {_norm_nit(table.rows[r].cells[col_nit].text) for r in cur}
         present26 = {(r["nit"], r["code"]) for r in recs26 if r["kind"] == "t"}
+        # (NIT, palabras de la descripción) que YA tienen fila en el Word: evita que la
+        # pasada de solo-2025 vuelva a agregar un tercero/concepto ya presente.
+        word_nd = [( _norm_nit(table.rows[r].cells[col_nit].text),
+                     _toks(table.rows[r].cells[col_des].text) if col_des is not None else set())
+                   for r in cur]
 
         def _add(rec, r25, bal):
             des_new = None
@@ -631,6 +678,9 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
                 continue
             if not _addable(rec) or abs(rec["value"]) < 1:
                 continue
+            rdes = _toks(rec["des"][-1]) if rec.get("des") else set()
+            if any(n == rec["nit"] and (dd & rdes) for n, dd in word_nd):
+                continue                                # ya hay fila de ese concepto en el Word
             _add(rec, rec, b25)
 
     # Recalcular fila de total = suma de filas de datos mostradas
@@ -654,6 +704,24 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
                 rep.chg(nota, cfg["sig"], "TOTAL", role, antes, nuevo)
 
     return matched_tids, table_accounts
+
+
+def _sub_por_des(bal, des, prefix):
+    """Código de la SUBcuenta (a cualquier nivel) bajo `prefix` cuyo nombre coincide
+    con la descripción de la fila (>=2 palabras), prefiriendo la más profunda. Sirve
+    para filas etiquetadas por subcuenta que en el auxiliar están en 0 y sin tercero
+    (p. ej. 'RETENCION ASUMIDA' de gastos): así toman su saldo (0), no el del padre."""
+    dw = _toks(_des_imp(des))
+    if len(dw) < 2:
+        return None
+    best, bs = None, 0
+    for code, c in bal.cuentas.items():
+        if prefix and not code.startswith(prefix):
+            continue
+        sc = len(dw & _toks(c.nombre))
+        if sc > bs or (sc == bs and best is not None and len(code) > len(best)):
+            bs, best = sc, code
+    return best if bs >= 2 else None
 
 
 def _best_sub(subs, label):
