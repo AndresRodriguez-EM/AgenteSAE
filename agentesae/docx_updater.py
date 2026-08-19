@@ -919,7 +919,11 @@ def _es_tabla_impuestos(table, header_r, b26, b25, nota):
             continue
         n_rows += 1
         sub = _best_sub(subs, des)
-        if sub is not None and any(sub.codigo.startswith(p) for p in clases):
+        # La descripción debe casar con el nombre de la subcuenta de impuestos por
+        # >=2 palabras: así 'ANTICIPO Y AVANCES' (anticipo a proveedores, 1330) no se
+        # confunde con 'ANTICIPO DE IMPUESTOS' (1355) por compartir solo 'ANTICIPO'.
+        if sub is not None and any(sub.codigo.startswith(p) for p in clases) \
+                and len(_toks(_des_imp(des)) & _toks(sub.nombre)) >= 2:
             n_match += 1
     return n_rows > 0 and n_match >= max(1, (n_rows + 1) // 2)
 
