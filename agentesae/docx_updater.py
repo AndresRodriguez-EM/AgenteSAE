@@ -71,8 +71,20 @@ def format_like(value: float, cell) -> str:
 _STOPWORDS = {"POR", "PARA", "CON", "LAS", "LOS", "DEL", "SUS", "QUE", "SIN", "ANTE"}
 
 
+def _stem(t: str) -> str:
+    """Normaliza el plural regular español (vocal+'s') para que la descripción de una
+    fila case con el nombre de la cuenta aunque difieran en número (p. ej. 'DEUDA
+    QUIROGRAFARIA' de la fila vs 'DEUDAS QUIROGRAFARIAS' de la cuenta). Solo quita una
+    's' final precedida de vocal: así NO colapsa 'PAGARES' (pagarés, un pasivo) a
+    'PAGAR' (que lo confundiría con 'IMPUESTOS POR PAGAR'). Se aplica a ambos lados por
+    igual, así que basta con que sea consistente."""
+    if len(t) > 3 and t.endswith("S") and t[-2] in "AEIOUÁÉÍÓÚ":
+        return t[:-1]
+    return t
+
+
 def _toks(s: str) -> set[str]:
-    return set(re.findall(r"[A-ZÁÉÍÓÚÑ]{3,}", (s or "").upper())) - _STOPWORDS
+    return {_stem(w) for w in re.findall(r"[A-ZÁÉÍÓÚÑ]{3,}", (s or "").upper())} - _STOPWORDS
 
 
 def _commonprefix(strs) -> str:
@@ -154,8 +166,10 @@ def _role_of(header: str):
         return None
     if "MOV" in h:
         return "mov"
-    comparativo = ("2025" in h) or ("2024" in h) or ("ANTERIOR" in h) or año
-    if "ACUMULAD" in h:
+    # 'AÑO' sugiere comparativo, PERO si el encabezado nombra el año en curso (2026)
+    # es la columna ACTUAL, no la del comparativo (p. ej. 'ACUMULADO AÑO 2026').
+    comparativo = ("2025" in h) or ("2024" in h) or ("ANTERIOR" in h) or (año and "2026" not in h)
+    if "ACUM" in h:                         # ACUMULADO / ACUMILADO (errata frecuente)
         return "comparativo" if comparativo else "acum_actual"
     if "SALDO" in h:
         if comparativo:
@@ -347,6 +361,29 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None, used=
     return None
 
 
+def _match_des_fuerte(recs, nit, des, used=None):
+    """Cuando un MISMO NIT tiene VARIAS subcuentas en la clase y la DESCRIPCIÓN de la
+    fila (>=2 palabras) identifica sin ambigüedad UNA de ellas por su nombre, devuelve
+    ese tercero —ignorando el ancla/target del grupo—. Resuelve tablas que mezclan
+    cuentas de un mismo tercero (p. ej. 'DEUDA QUIROGRAFARIA' 2335 vs 'CUOTAS DE
+    ADMINISTRACION' 2815 del mismo edificio): el nombre de la subcuenta manda, no el
+    saldo viejo del Word ni el total del grupo. Solo actúa si la coincidencia es única
+    y fuerte; en cualquier otro caso devuelve None y decide la lógica normal."""
+    dw = _toks(des)
+    if len(dw) < 2:
+        return None
+    tc = [r for r in recs if r["kind"] == "t" and r["nit"] == nit
+          and not (used and r.get("tid") in used)]
+    if len({r["code"] for r in tc}) <= 1:
+        return None                                  # sin ambigüedad de subcuenta
+    scored = [(max((len(dw & _toks(x)) for x in r["des"]), default=0), r) for r in tc]
+    best = max((s for s, _ in scored), default=0)
+    if best < 2:
+        return None
+    top = [r for s, r in scored if s == best]
+    return top[0] if len(top) == 1 else None
+
+
 def _account_code_rec(bal: Balance, code: str, prefixes):
     """Si la 'cédula' de una fila es en realidad un CÓDIGO DE CUENTA del alcance
     (algunas notas traen filas por cuenta, p. ej. 'saldo a favor renta'),
@@ -461,6 +498,7 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
     matched_tids = set()
     matched_keys = set()        # (nit, code) de terceros ya representados por una fila
     covered = set()
+    repr_codes = set()          # códigos de cuenta que las filas base SÍ emparejaron
 
     data_idx, total_idx = _data_rows(table, header_r, col_nit)
     nit_sep = _detect_nit_sep(table.rows[data_idx[0]].cells[col_nit].text) if data_idx and col_nit is not None else ","
@@ -533,7 +571,12 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
         scope_pref = tgt or anchor
         sub26 = [x for x in recs26 if x["code"].startswith(scope_pref)] if scope_pref else recs26
         sub25 = [x for x in recs25 if x["code"].startswith(scope_pref)] if scope_pref else recs25
-        r26 = match_record(sub26, nit, des, hint26, tname=tname, used=matched_tids)
+        # 1º: si la descripción identifica sin ambigüedad la subcuenta del NIT (tablas
+        # que mezclan varias cuentas de un mismo tercero), se usa esa —sin depender del
+        # ancla del grupo, que puede caer en otra cuenta de la clase con saldo parecido—.
+        r26 = _match_des_fuerte(recs26, nit, des, used=matched_tids)
+        if r26 is None:
+            r26 = match_record(sub26, nit, des, hint26, tname=tname, used=matched_tids)
         # Si dentro del ancla no hay pareja para el NIT (fila de una cuenta AJENA al
         # ancla, p. ej. FINANCIEROS agregada en la tabla de GASTOS EXTRAORDINARIOS),
         # se reintenta en TODA la clase de la nota, pero SOLO si aparece un TERCERO real
@@ -612,11 +655,19 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             if r26["kind"] == "t":
                 matched_tids.add(r26["tid"])
             else:
-                covered.add(r26["code"])
+                # Solo una cuenta que CONSOLIDA terceros (los tiene y los representa en
+                # esa única fila) bloquea altas de esa cuenta. Una cuenta sintética sin
+                # terceros (p. ej. la subcuenta que toma su saldo vía _sub_por_des) no
+                # consolida a nadie: no debe impedir agregar terceros nuevos de la misma
+                # cuenta (bug: dejaba fuera un tercero real de 'cuotas de administración').
+                if r26.get("child_nits") or r26.get("children"):
+                    covered.add(r26["code"])
                 matched_tids |= r26.get("children", set())
         for rr in (r26, r25):
             if rr and rr["kind"] == "t":
                 matched_keys.add((rr["nit"], rr["code"]))
+            if rr and rr.get("code"):
+                repr_codes.add(rr["code"])          # cuenta realmente representada
         famcode = (r26 or r25 or {}).get("code")
         for col, role in roles.items():
             cell = row.cells[col]
@@ -687,10 +738,17 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             shown_nits.add(rec["nit"])
             rep.added.append((cfg["sig"], rec["nit"], rec["t"].nombre, vals))
 
+        # Solo se agregan terceros de las cuentas que la tabla REALMENTE representa
+        # (las que emparejaron sus filas base, a 6 díg), no de las que el heurístico de
+        # grupo pudo señalar por azar de saldo: así no se inyectan filas de otra cuenta
+        # de la clase (p. ej. 'VALORES RECIBIDOS' 2815 en una tabla de deuda
+        # quirografaria 2335). Si ninguna fila base emparejó, se usa el heurístico.
+        add_codes = {c[:6] for c in repr_codes} or set(target_codes)
+
         def _addable(rec):
             return (rec["kind"] == "t"
                     and not any(rec["code"].startswith(cov) for cov in covered)
-                    and any(rec["code"].startswith(tc) for tc in target_codes))
+                    and any(rec["code"].startswith(tc) for tc in add_codes))
 
         for rec in recs26:                              # terceros del periodo (2026)
             if not _addable(rec) or rec["tid"] in matched_tids:
@@ -707,6 +765,22 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             if any(n == rec["nit"] and (dd & rdes) for n, dd in word_nd):
                 continue                                # ya hay fila de ese concepto en el Word
             _add(rec, rec, b25)
+
+    # Eliminar filas de tercero SIN saldo en NINGÚN período (0 en actual y comparativo):
+    # el usuario no conserva terceros sin movimiento ni saldo (p. ej. cuotas de
+    # administración de personas que ya no deben nada este mes ni el anterior). El
+    # auxiliar es la fuente: si la fila quedó en 0/0 tras actualizar, se retira.
+    if roles:
+        data_idx, _ = _data_rows(table, header_r, col_nit)
+        val_cols = [c for c, r in roles.items() if r != "variacion"]
+        drop = []
+        for r in data_idx:
+            vals = [parse_money(table.rows[r].cells[c].text) for c in val_cols]
+            if vals and all(v is not None and abs(v) < 1 for v in vals):
+                drop.append(r)
+        for r in sorted(drop, reverse=True):
+            tr = table.rows[r]._tr
+            tr.getparent().remove(tr)
 
     # Recalcular fila de total = suma de filas de datos mostradas
     data_idx, total_idx = _data_rows(table, header_r, col_nit)
@@ -1244,6 +1318,28 @@ def _unique_grid_cells(row):
     return out
 
 
+def _nota_de_tabla(table, header_r):
+    """Nota que DECLARA la columna 'NOTA' de la tabla (cada fila trae su número de
+    nota). Es más fiable que rastrear el 'current_note' por encabezados: varias notas
+    se titulan en un PÁRRAFO —que el recorrido por tablas no ve—, así que el
+    current_note queda viejo y la tabla se procesa con la clase equivocada (p. ej.
+    'INGRESOS POR ARRENDAMIENTOS' terminaba en clase 2 en vez de 41, perdiendo filas)."""
+    col = _col_index(table.rows[header_r], "NOTA")
+    if col is None:
+        return None
+    vals = []
+    for r in range(header_r + 1, len(table.rows)):
+        if col < len(table.rows[r].cells):
+            t = table.rows[r].cells[col].text.strip()
+            if re.fullmatch(r"\d{1,2}(\.\d+)?", t):
+                vals.append(t)
+    if not vals:
+        return None
+    from collections import Counter
+    n, cnt = Counter(vals).most_common(1)[0]
+    return n if (n in NOTE_CONFIG and cnt >= max(1, len(vals) // 2)) else None
+
+
 def process_contratos(table, cfg, b26, b25, rep: Report):
     """Tabla de detalle de contratos de arrendamiento (Nota 6). Toma de los
     ingresos (4155): cánon mensual y mes actual = MOVIMIENTO DEL MES; total
@@ -1669,8 +1765,12 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
                 process_vtotal(table, {"account": cfg["vtotal"], "nota": n, "sig": title}, b26, b25, rep)
         else:
             hr = _find_header_row(table)
-            if hr is not None and current_note in NOTE_CONFIG and current_note not in skip_notes:
+            # La columna 'NOTA' de la tabla manda sobre el rastreo por encabezados
+            # (que puede quedar viejo cuando la nota se titula en un párrafo).
+            n = _nota_de_tabla(table, hr) if hr is not None else None
+            if n is None:
                 n = current_note
+            if hr is not None and n in NOTE_CONFIG and n not in skip_notes:
                 clase = NOTE_CONFIG[n]["clase"]
                 kind = _detect_kind(table, hr)
                 info[n]["titles"].append(up)        # título de CUALQUIER sub-tabla
