@@ -676,6 +676,29 @@ def _best_sub(subs, label):
 # subcuenta —NO la suma de sus terceros— y NO se agregan terceros.
 _IMPUESTO_CLASES = {"24", "25", "26"}
 
+# Sinónimos de impuestos: el Word y el PUC nombran distinto el mismo impuesto.
+_IMP_SYN = {
+    "PREDIAL": ("PROPIEDAD", "RAIZ"),
+    "IVA": ("VENTAS",),
+    "AUTORRETENCION": ("RETENCION", "FUENTE"),
+    "AUTORETENCION": ("RETENCION", "FUENTE"),
+    "ICA": ("INDUSTRIA", "COMERCIO"),
+    "RETEICA": ("INDUSTRIA", "COMERCIO"),
+}
+
+
+def _des_imp(des: str) -> str:
+    """Normaliza y añade sinónimos de impuestos a la descripción para emparejarla con
+    el nombre de la subcuenta del PUC (p. ej. 'I.V.A.' -> IVA -> VENTAS; 'IMPUESTO
+    PREDIAL' <-> 'A LA PROPIEDAD RAIZ')."""
+    d = re.sub(r"\bI\.?\s*V\.?\s*A\.?\b", " IVA ", des or "", flags=re.I)   # I.V.A. -> IVA
+    extra = []
+    up = _toks(d)
+    for k, syns in _IMP_SYN.items():
+        if k in up:
+            extra += syns
+    return d + " " + " ".join(extra) if extra else d
+
 
 def _impuesto_scope(nota: str):
     if nota in ("4",):
@@ -837,7 +860,7 @@ def process_impuestos(table, cfg, b26, b25, rep: Report):
         libres = list(leaves)
         pend = []
         for r, des in data:
-            sub = _best_sub([c for k, c in allsubs.items() if k in libres], des)
+            sub = _best_sub([c for k, c in allsubs.items() if k in libres], _des_imp(des))
             if sub is not None:
                 _set_row(r, sub.codigo)
                 libres.remove(sub.codigo)
@@ -851,12 +874,42 @@ def process_impuestos(table, cfg, b26, b25, rep: Report):
         # subcuenta): se dejan las filas (do-no-harm) y solo se cuadra el total.
         pass
     else:
-        # Genérica (varias subcuentas por nombre, p. ej. cuenta 24): cada fila a su
-        # subcuenta por descripción si la coincidencia es clara.
+        # Genérica: cada fila a su cuenta por descripción (a cualquier nivel 4/6 díg),
+        # de MAYOR a menor coincidencia y SIN repetir cuenta. El valor de una fila que
+        # cayó en una cuenta PADRE se ajusta restándole las cuentas hijas asignadas a
+        # OTRAS filas (así 'DE INDUSTRIA Y COMERCIO' toma su 2412 y 'IMPUESTOS
+        # DESCONTABLES' toma el residuo del padre = su subcuenta). Las filas sin pareja
+        # clara se dejan como están (do-no-harm) y se avisan.
+        scored = []
         for r, des in data:
-            sub = _best_sub([c for c in allsubs.values()], des)
-            if sub is not None and len(_toks(des) & _toks(sub.nombre)) >= 1:
-                _set_row(r, sub.codigo)
+            best, bs = None, 0
+            for k, c in allsubs.items():
+                sc = len(_toks(_des_imp(des)) & _toks(c.nombre))
+                if sc > bs or (sc == bs and best and len(k) < len(best)):
+                    bs, best = sc, k
+            scored.append((bs, r, best))
+        scored.sort(key=lambda x: -x[0])
+        asign, sin = {}, []
+        for bs, r, best in scored:
+            if best and bs >= 1 and best not in asign.values():
+                asign[r] = best
+            else:
+                sin.append(r)
+        for r, code in asign.items():
+            otras = [c for rr, c in asign.items() if rr != r]
+            for col, role in roles.items():
+                if role == "mov":
+                    cc = b26.cuentas.get(code)
+                    val = abs(cc.debito - cc.credito) if cc else 0.0
+                else:
+                    bal = b25 if role == "comparativo" else b26
+                    val = abs(bal.saldo(code)) - sum(abs(bal.saldo(oc)) for oc in otras
+                                                     if oc != code and oc.startswith(code))
+                _set(table.rows[r].cells[col], val)
+        if sin:
+            rep.flags.append(
+                f"Nota {nota} · {cfg['sig'].strip()[:34]}: {len(sin)} fila(s) de impuestos sin "
+                f"subcuenta propia en el auxiliar (posible doble presentación; revisar).")
 
     if total is not None:
         for col, role in roles.items():
