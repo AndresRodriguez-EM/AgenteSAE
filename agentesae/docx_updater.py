@@ -1797,7 +1797,12 @@ def update_document(doc, b26: Balance, b25: Balance, skip_notes=SKIP_NOTES, crea
                     info[n]["matched"] |= matched
                     info[n]["accounts"] |= taccts
                 elif kind == "contratos":
-                    process_contratos(table, dict(nota=n, sig=title, scope=clase), b26, b25, rep)
+                    # El detalle de contratos de arrendamiento es SIEMPRE ingreso
+                    # (Nota 6, clase 41), aunque el rastreo de nota venga viejo: su
+                    # primera columna es un ITEM (1,2,3…), no la nota, así que hay que
+                    # fijar la clase para no emparejar contra la clase equivocada.
+                    process_contratos(table, dict(nota="6", sig=title, scope=NOTE_CONFIG["6"]["clase"]),
+                                       b26, b25, rep)
                 else:
                     process_cuenta(table, dict(nota=n, sig=title, account=clase[0]), b26, b25, rep)
 
