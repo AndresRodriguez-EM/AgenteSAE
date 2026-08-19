@@ -166,16 +166,17 @@ def _role_of(header: str):
         return None
     if "MOV" in h:
         return "mov"
-    # 'AÑO' sugiere comparativo, PERO si el encabezado nombra el año en curso (2026)
-    # es la columna ACTUAL, no la del comparativo (p. ej. 'ACUMULADO AÑO 2026').
-    comparativo = ("2025" in h) or ("2024" in h) or ("ANTERIOR" in h) or (año and "2026" not in h)
+    # Comparativo = referencia a un AÑO anterior (2025/2024, o 'AÑO' sin ser 2026).
+    # OJO: 'MES ANTERIOR' (mes anterior, no año) NO es comparativo —a veces rotula mal
+    # la columna del período actual—; solo 'AÑO ANTERIOR' lo es (lo capta 'año').
+    comparativo = ("2025" in h) or ("2024" in h) or (año and "2026" not in h)
     if "ACUM" in h:                         # ACUMULADO / ACUMILADO (errata frecuente)
         return "comparativo" if comparativo else "acum_actual"
     if "SALDO" in h:
         if comparativo:
             return "comparativo"
-        if "ACTUAL" in h or "2026" in h:    # 'SALDO MES 2026' = columna del periodo
-            return "actual"
+        return "actual"                     # SALDO del período actual (aunque diga
+                                            # 'MES ANTERIOR' por errata en la plantilla)
     return None
 
 
