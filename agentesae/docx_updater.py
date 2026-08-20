@@ -101,6 +101,16 @@ def _norm_nit(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
 
+def _nit_cercano(a: str, b: str) -> bool:
+    """True si dos NIT difieren en a lo sumo un dígito (misma longitud) — típico error
+    de digitación en la plantilla (p. ej. 860512230 vs 860512330). Sirve para NO
+    duplicar un tercero cuando el Word trae el NIT con una errata frente al auxiliar."""
+    a, b = _norm_nit(a), _norm_nit(b)
+    if not a or not b or len(a) != len(b) or len(a) < 6:
+        return False
+    return sum(1 for x, y in zip(a, b) if x != y) <= 1
+
+
 def _detect_nit_sep(sample: str) -> str:
     if "." in (sample or ""):
         return "."
@@ -359,6 +369,14 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None, used=
         nt = [r for r in recs if r["kind"] == "t" and len(tn & _toks(r["t"].nombre)) >= 2]
         if nt:
             return _pick(nt, des, hint)
+        # Nombre de UNA sola palabra distintiva (p. ej. 'SERVIENTREGA') + NIT casi igual:
+        # es el mismo tercero con el NIT mal digitado en la plantilla. Se empareja (así
+        # toma su valor y no se agrega una fila duplicada con el NIT del auxiliar).
+        if nit and any(len(w) >= 5 for w in tn):
+            nc = [r for r in recs if r["kind"] == "t" and (tn & _toks(r["t"].nombre))
+                  and _nit_cercano(nit, r["nit"])]
+            if nc:
+                return _pick(nc, des, hint)
     return None
 
 
