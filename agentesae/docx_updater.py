@@ -377,11 +377,26 @@ def _match_des_fuerte(recs, nit, des, used=None):
           and not (used and r.get("tid") in used)]
     if len({r["code"] for r in tc}) <= 1:
         return None                                  # sin ambigüedad de subcuenta
-    scored = [(max((len(dw & _toks(x)) for x in r["des"]), default=0), r) for r in tc]
-    best = max((s for s, _ in scored), default=0)
-    if best < 2:
+
+    def score(r):
+        # mejor solape con el nombre de la cuenta y, a igualdad, el nombre con MENOS
+        # palabras sobrantes (mayor Jaccard): 'CUOTA ADMINISTRACION' prefiere 'CUOTAS
+        # DE ADMINISTRACION' sobre 'CUOTAS DE ADMINISTRACION PARQUEADEROS'.
+        best_ov, best_extra = 0, 99
+        for x in r["des"]:
+            xt = _toks(x)
+            ov = len(dw & xt)
+            if ov > best_ov or (ov == best_ov and len(xt) - ov < best_extra):
+                best_ov, best_extra = ov, len(xt) - ov
+        return best_ov, best_extra
+
+    scored = [(score(r), r) for r in tc]
+    best_ov = max((s[0] for s, _ in scored), default=0)
+    if best_ov < 2:
         return None
-    top = [r for s, r in scored if s == best]
+    cands = [(s, r) for s, r in scored if s[0] == best_ov]
+    min_extra = min(s[1] for s, _ in cands)
+    top = [r for s, r in cands if s[1] == min_extra]
     return top[0] if len(top) == 1 else None
 
 
