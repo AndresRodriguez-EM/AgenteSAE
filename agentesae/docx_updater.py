@@ -840,16 +840,22 @@ def _sub_por_des(bal, des, prefix):
 
 
 def _best_sub(subs, label):
-    """Subcuenta cuyo nombre mejor coincide con el rótulo de la fila."""
-    lt = _toks(label)
+    """Subcuenta cuyo nombre mejor coincide con el rótulo de la fila. A igualdad de
+    solape, gana el nombre con MENOS palabras sobrantes (mayor Jaccard) y, en último
+    término, el código más corto: así 'ANTICIPO IMPUESTO DE RENTA' prefiere 135505
+    ('ANTICIPO IMPUESTO DE RENTA') sobre 135506 ('...RENTA SALDO A FAVOR')."""
+    lt = _toks(_des_imp(label))
     if not lt:
         return None
-    best, bs = None, 0
+    best = None
+    best_key = (-1, 99, 99)                          # (solape, -sobrantes, -len_código)
     for c in subs:
-        sc = len(lt & _toks(c.nombre))
-        if sc > bs or (sc == bs and best is not None and len(c.codigo) < len(best.codigo)):
-            bs, best = sc, c
-    return best if bs > 0 else None
+        ct = _toks(c.nombre)
+        sc = len(lt & ct)
+        key = (sc, -(len(ct) - sc), -len(c.codigo))
+        if key > best_key:
+            best_key, best = key, c
+    return best if best_key[0] > 0 else None
 
 
 # Clases del PUC que se presentan a nivel de CUENTA/SUBCUENTA (no de tercero):
