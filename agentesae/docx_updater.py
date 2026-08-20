@@ -432,6 +432,18 @@ def _es_neteo(recs, code4):
     return any(v > 0 for v in vals) and any(v < 0 for v in vals)
 
 
+def _netea_bal(b26, b25, code4):
+    """Como _es_neteo pero a partir de los saldos de las subcuentas (6 díg) —para
+    process_impuestos, que no arma registros de tercero—. La retención (2365) netea
+    'pago retenciones' (+) contra 'autorretención' (−): el Word muestra el NETO."""
+    vals = []
+    for bal in (b26, b25):
+        for code, c in bal.cuentas.items():
+            if code.startswith(code4) and len(code) == 6:
+                vals.append(c.nuevo_saldo)
+    return any(v > 0 for v in vals) and any(v < 0 for v in vals)
+
+
 def _val(role, r26, r25):
     if role == "comparativo":
         return abs(r25["value"]) if r25 else 0.0
@@ -891,7 +903,9 @@ def _des_imp(des: str) -> str:
 
 def _impuesto_scope(nota: str):
     if nota in ("4",):
-        return ["24", "25", "26"]
+        # 2365 = retención en la fuente POR PAGAR (clase 23): se presenta junto con los
+        # impuestos por pagar y como NETO (pago retenciones vs autorretención).
+        return ["24", "25", "26", "2365"]
     if nota in ("2",):
         return ["1355"]
     return []
@@ -1047,6 +1061,16 @@ def process_impuestos(table, cfg, b26, b25, rep: Report):
         # Tabla de UNA subcuenta (p. ej. 'IMPUESTO POR PAGAR - IVA'): se usa el saldo
         # de la cuenta de 4 díg (NETO de IVA generado/descontable, etc.).
         _set_row(data[0][0], anchor)
+    elif len(data) == 1 and not anchor:
+        # UNA fila sin ancla por título (p. ej. 'PAGO RETENCION RENTA'): se mapea su
+        # descripción a la mejor subcuenta; si su cuenta de 4 díg NETEA (retención:
+        # pago vs autorretención), se usa el NETO de esa cuenta, no una subcuenta suelta
+        # —evita tomar el impuesto de renta (2404) por compartir la palabra 'RENTA'—.
+        r, des = data[0]
+        best = _best_sub(list(allsubs.values()), _des_imp(des))
+        if best is not None:
+            c4 = best.codigo[:4]
+            _set_row(r, c4 if _netea_bal(b26, b25, c4) else best.codigo)
     elif data and len(data) == len(leaves):
         # 1-a-1: por descripción y, lo que sobre, por eliminación (resuelve
         # 'AUTORRETENCION' -> 135515 cuando hay tantas filas como subcuentas).
