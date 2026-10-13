@@ -542,6 +542,7 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
     recs25 = scope_records(b25, cfg["scope"])
     allowed = {r["nit"] for r in recs26 + recs25 if r["kind"] == "t"}
     matched_tids = set()
+    matched_tids25 = set()      # tids de terceros 2025 ya usados (comparativo por descripción)
     matched_keys = set()        # (nit, code) de terceros ya representados por una fila
     covered = set()
     repr_codes = set()          # códigos de cuenta que las filas base SÍ emparejaron
@@ -662,7 +663,18 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             r26 = _acc(b26, esp)
             r25 = _acc(b25, esp)
         else:
-            r25 = find_same25(recs25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
+            # El COMPARATIVO (2025) respeta la DESCRIPCIÓN de la fila. Si el tercero solo
+            # tiene saldo 2026 en una subcuenta ajena (p. ej. 'ARRENDAMIENTO' con saldo y
+            # 'CUOTA ADMINISTRACION' en 0/ausente en 2026), r26 cae en esa ajena y el 2025
+            # NO debe heredarla: se busca por descripción en 2025 ('CUOTA ADMINISTRACION'
+            # -> 1345950501) y, si identifica una subcuenta distinta, manda esa.
+            r25df = _match_des_fuerte(recs25, nit, des, used=matched_tids25)
+            if r25df is not None and (r26 is None or r25df["code"] != r26["code"]):
+                r25 = r25df
+            else:
+                r25 = find_same25(recs25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
+            if r25 is not None and r25.get("kind") == "t":
+                matched_tids25.add(r25["tid"])
         # Emparejó con una CUENTA por coincidencia con un valor VIEJO del Word, pero su
         # descripción (>=2 palabras) no comparte ninguna con el nombre de esa cuenta: la
         # subcuenta que nombra la fila ya no está en el auxiliar -> la fila queda en 0.
