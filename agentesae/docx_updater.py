@@ -669,7 +669,8 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             # NO debe heredarla: se busca por descripción en 2025 ('CUOTA ADMINISTRACION'
             # -> 1345950501) y, si identifica una subcuenta distinta, manda esa.
             r25df = _match_des_fuerte(recs25, nit, des, used=matched_tids25)
-            if r25df is not None and (r26 is None or r25df["code"] != r26["code"]):
+            if (r25df is not None and (r26 is None or r26.get("kind") == "t")
+                    and (r26 is None or r25df["code"] != r26["code"])):
                 r25 = r25df
             else:
                 r25 = find_same25(recs25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
