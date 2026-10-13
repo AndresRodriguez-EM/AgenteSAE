@@ -76,8 +76,11 @@ def _stem(t: str) -> str:
     fila case con el nombre de la cuenta aunque difieran en número (p. ej. 'DEUDA
     QUIROGRAFARIA' de la fila vs 'DEUDAS QUIROGRAFARIAS' de la cuenta). Solo quita una
     's' final precedida de vocal: así NO colapsa 'PAGARES' (pagarés, un pasivo) a
-    'PAGAR' (que lo confundiría con 'IMPUESTOS POR PAGAR'). Se aplica a ambos lados por
-    igual, así que basta con que sea consistente."""
+    'PAGAR' (que lo confundiría con 'IMPUESTOS POR PAGAR'). Además normaliza la errata
+    frecuente 'sion'->'cion' ('RETENSION' de la plantilla vs 'RETENCION' del auxiliar).
+    Se aplica a ambos lados por igual, así que basta con que sea consistente."""
+    if "SION" in t:
+        t = t.replace("SION", "CION")
     if len(t) > 3 and t.endswith("S") and t[-2] in "AEIOUÁÉÍÓÚ":
         return t[:-1]
     return t
@@ -336,6 +339,11 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None, used=
     tc = [r for r in recs if r["kind"] == "t" and r["nit"] == nit]
     # A nivel de cuenta solo si el NIT pertenece a esa cuenta (es uno de sus terceros).
     ac = [r for r in recs if r["kind"] == "acc" and nit in r.get("child_nits", set())]
+    # Una cuenta cuyos terceros YA están TODOS usados por otras filas no se reasigna:
+    # evita que una fila DUPLICADA (mismo NIT/subcuenta) tome de nuevo el total de la
+    # cuenta (p. ej. dos renglones 'IVA MAYOR VALOR' del mismo banco con un solo saldo).
+    if used:
+        ac = [r for r in ac if not (r.get("children") and r["children"] <= used)]
     # Si la DESCRIPCIÓN de la fila identifica con fuerza (>=2 palabras) la SUBcuenta
     # de un tercero del mismo NIT, se usa ESE tercero —aunque su valor sea 0— en vez
     # de la cuenta padre cuyo saldo coincida con un valor viejo del Word (p. ej.
@@ -346,6 +354,12 @@ def match_record(recs, nit, des, hint=None, allowed_nits=None, tname=None, used=
         dm = [r for r in tc if max((len(dw & _toks(x)) for x in r["des"]), default=0) >= 2]
         if dm:
             return _pick(dm, des, hint)
+        # La descripción (>=2 palabras) NO coincide con ninguna subcuenta del NIT: el
+        # concepto de la fila no existe en el auxiliar para ese tercero -> sin match
+        # (queda en 0) en vez de robar por valor la subcuenta de otra fila distinta
+        # (p. ej. 'IVA MAYOR VALOR' de la DIAN, que solo tiene retención y no deducibles).
+        if all(max((len(dw & _toks(x)) for x in r["des"]), default=0) == 0 for r in tc):
+            return None
     rh = _round(abs(hint)) if hint else None
     if rh is not None:
         et = [r for r in tc if _round(abs(r["value"])) == rh]
@@ -660,8 +674,17 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
                 return dict(kind="acc", code=code, value=bal.saldo(code),
                             mov=abs(cc.debito - cc.credito) if cc else 0.0,
                             des=[cc.nombre] if cc else [], child_nits=set())
-            r26 = _acc(b26, esp)
-            r25 = _acc(b25, esp)
+            # Si el/los tercero(s) del NIT en esa subcuenta YA fueron usados por otra fila,
+            # esta fila es DUPLICADA (mismo NIT y subcuenta con un solo saldo) -> 0, no se
+            # repite el saldo de la cuenta (p. ej. dos renglones 'IVA MAYOR VALOR' del banco).
+            tids_nit = {id(t) for c2, cc in b26.cuentas.items() if c2.startswith(esp)
+                        for t in (cc.terceros or []) if _norm_nit(getattr(t, "nit", "")) == nit}
+            if tids_nit and tids_nit <= matched_tids:
+                z = dict(kind="acc", code=esp, value=0.0, mov=0.0, des=[], child_nits=set())
+                r26 = r25 = z                            # fila duplicada -> 0 (luego se elimina)
+            else:
+                r26 = _acc(b26, esp)
+                r25 = _acc(b25, esp)
         else:
             # El COMPARATIVO (2025) respeta la DESCRIPCIÓN de la fila. Si el tercero solo
             # tiene saldo 2026 en una subcuenta ajena (p. ej. 'ARRENDAMIENTO' con saldo y
@@ -684,6 +707,14 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
             an = _toks(r26["des"][-1]) if r26.get("des") else set()
             if an and not (_toks(_des_imp(des)) & an):
                 r26 = r25 = None
+        # Igual pero para TERCERO: si la fila cuadró con un tercero cuya subcuenta NO tiene
+        # relación con la descripción, y la descripción nombra una subcuenta que ESTE NIT
+        # no posee, la fila no le corresponde -> 0 (evita que 'IVA MAYOR VALOR' de la DIAN
+        # tome por valor la 'retención asumida' y descuadre las demás filas de la DIAN).
+        if (r26 is not None and r26.get("kind") == "t" and len(_toks(des)) >= 2
+                and not (_toks(_des_imp(des)) & _toks(r26["des"][-1] if r26.get("des") else ""))
+                and _des_nombra_subcuenta_ajena(b26, nit, des, cfg["scope"])):
+            r26 = r25 = None
         # En una tabla POR-TERCERO (varias filas), una fila NO representa el TOTAL de
         # una cuenta de VARIOS terceros: si solo cuadró con esa cuenta (su tercero está
         # ausente o ya lo tomó otra fila duplicada), queda en 0 y NO marca como usados a
@@ -880,6 +911,30 @@ def _sub_por_des(bal, des, prefix):
         if sc > bs or (sc == bs and best is not None and len(code) > len(best)):
             bs, best = sc, code
     return best if bs >= 2 else None
+
+
+def _des_nombra_subcuenta_ajena(bal, nit, des, clase):
+    """True si la DESCRIPCIÓN de la fila (>=2 palabras) nombra una SUBcuenta concreta de
+    la clase (coincidencia >=2 con el nombre de la cuenta) que ESTE NIT no tiene en el
+    auxiliar. Sirve para no asignarle por proximidad de valor una subcuenta ajena (p. ej.
+    la fila 'IVA MAYOR VALOR' de la DIAN, que no tiene esa subcuenta y terminaba robando
+    el valor de su 'retención asumida')."""
+    dw = _toks(_des_imp(des))
+    if len(dw) < 2:
+        return False
+    for code, c in bal.cuentas.items():
+        if not any(code.startswith(p) for p in clase):
+            continue
+        if len(dw & _toks(c.nombre)) >= 2:
+            # ¿el NIT tiene un tercero en esta subcuenta (o en alguna hija)?
+            if any(_norm_nit(getattr(t, "nit", "")) == nit for t in (c.terceros or [])):
+                return False
+            for c2, cc in bal.cuentas.items():
+                if c2.startswith(code) and any(_norm_nit(getattr(t, "nit", "")) == nit
+                                               for t in (cc.terceros or [])):
+                    return False
+            return True
+    return False
 
 
 def _best_sub(subs, label):
