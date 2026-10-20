@@ -699,6 +699,36 @@ def process_terceros(table, cfg, b26, b25, rep: Report):
                 r25 = find_same25(recs25, r26) if r26 else match_record(sub25, nit, des, hint25, tname=tname)
             if r25 is not None and r25.get("kind") == "t":
                 matched_tids25.add(r25["tid"])
+        # La fila cuadró con una CUENTA (subcuenta concreta) que su DESCRIPCIÓN nombra
+        # (>=2 palabras que coinciden con el nombre de la cuenta) y cuyo saldo pertenece a
+        # TERCEROS: debe mostrar SOLO el del NIT de la fila (por año), 0 si ese NIT no lo
+        # tiene —no el saldo de la cuenta, que sería de OTRO tercero (bug 'parqueadero': el
+        # saldo de un único tercero se replicaba en varias filas)—. No aplica a cuentas SIN
+        # terceros (p. ej. 'ANTICIPO IMPUESTO DE RENTA', rotulada con un NIT representativo),
+        # ni a subcuentas que NETEAN (signos opuestos: el Word da el neto), ni a filas cuya
+        # descripción no identifica la subcuenta (p. ej. 'OTROS', que se maneja aparte).
+        _accnom = _toks(r26["des"][-1]) if (r26 and r26.get("kind") == "acc" and r26.get("des")) else set()
+        if (r26 is not None and r26.get("kind") == "acc" and len(data_idx) > 1
+                and len(_toks(des)) >= 2 and len(_toks(_des_imp(des)) & _accnom) >= 2):
+            _code = r26["code"]
+            def _ters(bal, code):
+                acc = {}
+                for c2, cc in bal.cuentas.items():
+                    if c2.startswith(code):
+                        for t in (cc.terceros or []):
+                            k = _norm_nit(getattr(t, "nit", ""))
+                            acc[k] = acc.get(k, 0.0) + (getattr(t, "nuevo_saldo", 0.0) or 0.0)
+                return acc
+            t26, t25 = _ters(b26, _code), _ters(b25, _code)
+            allv = list(t26.values()) + list(t25.values())
+            neteo_local = any(v > 0 for v in allv) and any(v < 0 for v in allv)
+            if (t26 or t25) and not neteo_local:
+                def _mk(bal, code, val):
+                    cc = bal.cuentas.get(code)
+                    return dict(kind="acc", code=code, value=val, mov=0.0,
+                                des=[cc.nombre] if cc else [], child_nits=set())
+                r26 = _mk(b26, _code, t26.get(nit, 0.0))
+                r25 = _mk(b25, _code, t25.get(nit, 0.0))
         # Emparejó con una CUENTA por coincidencia con un valor VIEJO del Word, pero su
         # descripción (>=2 palabras) no comparte ninguna con el nombre de esa cuenta: la
         # subcuenta que nombra la fila ya no está en el auxiliar -> la fila queda en 0.
@@ -1143,6 +1173,20 @@ def process_impuestos(table, cfg, b26, b25, rep: Report):
 
     leaves = _leaves(anchor)
 
+    # ¿Las filas nombran (por descripción, >=2 palabras) VARIAS subcuentas HOJA
+    # DISTINTAS del ancla? Entonces la tabla NO es 'una subcuenta en varias filas'
+    # (vigencias de un mismo impuesto): es un cuadro con VARIOS impuestos (p. ej.
+    # 'ANTICIPO DE IMPUESTOS': renta / autorretención / IVA). En ese caso el ancla de
+    # 4 díg (que el título casa por el nombre de la clase) NO debe disparar el
+    # do-no-harm de la rama 'anchor and data': cada fila debe tomar SU subcuenta.
+    _leafcts = [allsubs[k] for k in leaves if k in allsubs]
+    _subs_nombradas = set()
+    for _r, _des in data:
+        _s = _best_sub(_leafcts, _des)
+        if _s is not None and len(_toks(_des_imp(_des)) & _toks(_s.nombre)) >= 2:
+            _subs_nombradas.add(_s.codigo)
+    varias_subs = len(_subs_nombradas) >= 2
+
     if anchor and len(data) == 1:
         # Tabla de UNA subcuenta (p. ej. 'IMPUESTO POR PAGAR - IVA'): se usa el saldo
         # de la cuenta de 4 díg (NETO de IVA generado/descontable, etc.).
@@ -1172,7 +1216,7 @@ def process_impuestos(table, cfg, b26, b25, rep: Report):
         for r in pend:
             if libres:
                 _set_row(r, libres.pop(0))
-    elif anchor and data:
+    elif anchor and data and not varias_subs:
         # UNA subcuenta con varias filas (p. ej. vigencias de renta que ya suman la
         # subcuenta): se dejan las filas (do-no-harm) y solo se cuadra el total.
         pass
@@ -1183,14 +1227,30 @@ def process_impuestos(table, cfg, b26, b25, rep: Report):
         # OTRAS filas (así 'DE INDUSTRIA Y COMERCIO' toma su 2412 y 'IMPUESTOS
         # DESCONTABLES' toma el residuo del padre = su subcuenta). Las filas sin pareja
         # clara se dejan como están (do-no-harm) y se avisan.
+        # Pool PROFUNDO (incluye 10 díg): separa conceptos que a 6 díg colapsan en una
+        # sola cuenta cuyo NOMBRE casa con una fila pero cuyo SALDO pertenece a una hija
+        # de otro nombre —p. ej. 135515 'RETENCION EN LA FUENTE' cuyo saldo es de la hija
+        # 1355150502 'AUTORRETENCION RENTA'—. A igualdad de solape (con sinónimos) gana la
+        # mayor coincidencia LITERAL del nombre y, por último, el código más corto: así
+        # 'AUTORRETENCION' toma su 10 díg y 'RETENCION' el 6 díg (que, al restarle la hija,
+        # queda en su resto). Las demás ramas siguen con subcuentas de 4/6 díg.
+        pooldeep = _subcuentas_valor(b26, b25, clases, niveles=(4, 6, 10))
+        # Una fila ESPECÍFICA no debe emparejar con el ANCLA de 4 díg (el padre de TODA
+        # la clase, p. ej. 1355 'ANTICIPO... O SALDOS A FAVOR'), cuyo nombre a veces casa
+        # por coincidencia: tomaría el TOTAL de la clase y, al restarle las hijas, saldría
+        # negativo. Cuando el ancla tiene varias hojas, se descarta como candidato de fila.
+        cand_items = [(k, c) for k, c in pooldeep.items()
+                      if not (anchor and k == anchor and len(leaves) > 1)]
         scored = []
         for r, des in data:
-            best, bs = None, 0
-            for k, c in allsubs.items():
+            best, bkey = None, (0, 0, 0)
+            for k, c in cand_items:
                 sc = len(_toks(_des_imp(des)) & _toks(c.nombre))
-                if sc > bs or (sc == bs and best and len(k) < len(best)):
-                    bs, best = sc, k
-            scored.append((bs, r, best))
+                dsc = len(_toks(des) & _toks(c.nombre))      # coincidencia LITERAL (sin sinónimos)
+                key = (sc, dsc, -len(k))
+                if sc >= 1 and key > bkey:
+                    bkey, best = key, k
+            scored.append((bkey[0], r, best))
         scored.sort(key=lambda x: -x[0])
         asign, sin = {}, []
         for bs, r, best in scored:
